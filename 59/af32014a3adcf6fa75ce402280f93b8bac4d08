@@ -1,0 +1,41 @@
+packages/workshop-backend/__tests__/access.test.ts
+  s_8a7a52c9237b54::t_123c5778a51f1b 2-7,73-88,96-97
+packages/workshop-backend/__tests__/ai-models.test.ts
+  s_8a7a52c9237b54::t_721472df642e59 2-10,65-75,89,112-120,147,152-174,176-208,225,244-258,369,392-403
+packages/workshop-backend/src/access.ts
+  s_8a7a52c9237b54::t_e1bae6f365fd74 42-48,52-54
+packages/workshop-backend/src/ai-models.ts
+  s_8a7a52c9237b54::t_f058fa6bbd5c45 35-40,48,100-110,264,266,275-284,302-304,318,320-321,364-381,387-391,398,409,471,676-680,711-722,732-736
+packages/workshop-backend/src/overseer.ts
+  s_8a7a52c9237b54::t_9ef5756169dfb2 1913,1918,1945-1951,4734-4739,6694-6702,6709-6715,6782-6790,7096-7104,7117-7124,7128-7154,7157-7164,7220-7229,7488-7495,7656-7658,7699-7706,7708-7711,7743-7750,7757-7762,7812-7814,8129-8131,8413-8419,8422-8427,8472-8477,8488-8493,9069-9073,10325-10331,10591-10595,10923-10927,11104-11109,11502-11508,11985-11991,13145-13149
+packages/workshop-backend/src/server.ts
+  s_8a7a52c9237b54::t_adbc5dd8f1b6c1 3-41,66,707-712,784,788,927,937-941,944,956-960
+packages/workshop-backend/src/user.ts
+  s_8a7a52c9237b54::t_87c9940fc42601 102,233,406,765-766
+packages/workshop-backend/__tests__/user-access.test.ts
+  s_0a259dad36612c::t_0f4fd38cf86128 1-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "59af32014a3adcf6fa75ce402280f93b8bac4d08",
+  "prompts": {},
+  "sessions": {
+    "s_0a259dad36612c": {
+      "agent_id": {
+        "tool": "devin",
+        "id": "s_0a259dad36612c",
+        "model": "unknown"
+      },
+      "human_author": "Nikhil <vnikhilbuddhavarapu@outlook.com>"
+    },
+    "s_8a7a52c9237b54": {
+      "agent_id": {
+        "tool": "windsurf",
+        "id": "vine-swordtail",
+        "model": "unknown"
+      },
+      "human_author": "Nikhil <vnikhilbuddhavarapu@outlook.com>"
+    }
+  }
+}
