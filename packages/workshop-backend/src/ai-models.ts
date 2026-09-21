@@ -31,20 +31,13 @@ import { bridgePdfAttachments } from "./chat-attachment-pdf.js";
    apiKey: string;
  }
 
-// Gadgets-owned attribution schema attached to AI Gateway requests.
-type GatewayMetadata = {
-  // Stable Gadgets user identifier for attribution.
-  user: string;
-  // Gadgets execution context, present when the call is associated with a gadget operation.
-  source?: GatewayMetadataContext["source"];
-  gadgetId?: string;
-  chatId?: number;
-  // Distinguishes gadget-initiated model calls from interactive user calls.
-  automated?: true;
-};
-
 type GatewayMetadataContext = {
-  source: "chat" | "thread-title" | "gadget-title" | "model-binding";
+  source:
+    | "chat"
+    | "thread-title"
+    | "gadget-title"
+    | "model-binding"
+    | "binding-name";
   gadgetId?: string;
   chatId?: number;
 };
@@ -52,6 +45,7 @@ type GatewayMetadataContext = {
 type ModelRoutingOptions = {
   sessionAffinity?: string;
   userGateway?: UserGatewayRouting;
+  trustedAccessEmail?: string;
   metadata?: GatewayMetadataContext;
 };
 
@@ -103,15 +97,17 @@ export type ModelHandle = {
   lastResponse?: { status: number; aiGatewayLogId?: string };
 };
 
-function buildMetadata(initiator: AiChatAuthorInfo, context?: GatewayMetadataContext): GatewayMetadata {
-  const metadata: GatewayMetadata = { user: initiator.id };
-  if (context) {
-    metadata.source = context.source;
-    if (context.gadgetId) metadata.gadgetId = context.gadgetId;
-    if (context.chatId !== undefined) metadata.chatId = context.chatId;
-  }
-  if (initiator.type === "gadget") metadata.automated = true;
-  return metadata;
+function serializeGatewayMetadata(
+  trustedAccessEmail: string | undefined,
+  context?: GatewayMetadataContext,
+): string {
+  return JSON.stringify({
+    ...(trustedAccessEmail ? { user_email: trustedAccessEmail } : {}),
+    application: "peer-point-os",
+    ...(context ? { source: context.source } : {}),
+    ...(context?.gadgetId ? { gadget_id: context.gadgetId } : {}),
+    ...(context?.chatId !== undefined ? { chat_id: context.chatId } : {}),
+  });
 }
 
 // The pi API implementations we route through, keyed by `Model.api`. Import per-module (never
@@ -265,9 +261,9 @@ type HandleArgs = {
   // alongside cf-aig-authorization makes pi skip SDK auth entirely).
   apiKey?: string;
   headers?: ProviderHeaders;
-  // Structured gateway attribution; sent as `cf-aig-metadata` on gateway-routed requests only
+  // Serialized gateway attribution; sent as `cf-aig-metadata` on gateway-routed requests only
   // (pi does not forward options.metadata to that header itself).
-  gatewayMetadata?: GatewayMetadata;
+  gatewayMetadata?: string;
   sessionAffinity?: string;
   aiGatewayLogRoute?: AiGatewayLogRoute;
   // Transport override for every request on this handle: how a binding-routed model reaches the
@@ -275,6 +271,16 @@ type HandleArgs = {
   // A per-call options.fetch still wins, which tests rely on to capture requests.
   fetch?: FetchFunction;
 };
+
+function withoutGatewayMetadata(
+  headers: ProviderHeaders | undefined,
+): ProviderHeaders {
+  return Object.fromEntries(
+    Object.entries(headers ?? {}).filter(
+      ([name]) => name.toLowerCase() !== "cf-aig-metadata",
+    ),
+  );
+}
 
 function makeHandle(args: HandleArgs): ModelHandle {
   const streamFn = API_STREAMS[args.model.api];
@@ -293,7 +299,9 @@ function makeHandle(args: HandleArgs): ModelHandle {
   //   content, which -- with pi's unconditional `store: false` -- preserves the old stateless
   //   ZDR behavior with reasoning carried between tool steps.
   // - Everything else: provider defaults.
-  const anthropicCompat = args.model.compat as AnthropicMessagesCompat | undefined;
+  const anthropicCompat = args.model.compat as
+    | AnthropicMessagesCompat
+    | undefined;
   const apiExtras: Record<string, unknown> =
       args.model.api === "anthropic-messages"
           ? (anthropicCompat?.forceAdaptiveThinking === true ? { thinkingEnabled: true } : {}) :
@@ -307,10 +315,10 @@ function makeHandle(args: HandleArgs): ModelHandle {
       handle.lastResponse = undefined;
       const headers: ProviderHeaders = {
         ...args.headers,
-        ...options.headers,
+        ...withoutGatewayMetadata(options.headers),
         ...(args.gatewayMetadata
-            ? { "cf-aig-metadata": JSON.stringify(args.gatewayMetadata) }
-            : {}),
+          ? { "cf-aig-metadata": args.gatewayMetadata }
+          : {}),
       };
       const merged: SimpleStreamOptions = {
         // API defaults first, so an explicit per-call option can override them. `thinking: false`
@@ -353,23 +361,41 @@ function makeHandle(args: HandleArgs): ModelHandle {
  * access with the config's own credentials. The handle carries the matching AI Gateway log route
  * for cost accounting, when there is one.
  */
-export function getModel(env: Cloudflare.Env, config: AiModelConfig,
-                         initiator: AiChatAuthorInfo,
-                         options: ModelRoutingOptions = {}): ModelHandle {
+export function getModel(
+  env: Cloudflare.Env,
+  config: AiModelConfig,
+  _initiator: AiChatAuthorInfo,
+  options: ModelRoutingOptions = {},
+): ModelHandle {
+  const gatewayMetadata = () => {
+    if (env.CF_ACCESS_AUD && !options.trustedAccessEmail) {
+      throw new Error(
+        "A verified Cloudflare Access email is required for AI Gateway requests.",
+      );
+    }
+    return serializeGatewayMetadata(
+      options.trustedAccessEmail,
+      options.metadata,
+    );
+  };
+
   // BYOK: a connected user's own Cloudflare account pays for everything (all providers, including
   // Workers AI), routed through the user's own AI Gateway with unified billing. Honored regardless
   // of whether a platform AI Gateway is configured, so connected users are always billed correctly.
   if (options.userGateway) {
     return getModelViaUserGateway(
-        config, buildMetadata(initiator, options.metadata), options.userGateway,
-        options.sessionAffinity);
+      config,
+      gatewayMetadata(),
+      options.userGateway,
+      options.sessionAffinity,
+    );
   }
 
   // Otherwise: when a platform AI Gateway is configured, route through it (platform-funded free
   // tier). The config's apiToken/apiUrl are ignored in that mode.
   let gwConfig = getAiGatewayConfig(env);
   if (gwConfig) {
-    return getModelViaGateway(gwConfig, config, initiator, options);
+    return getModelViaGateway(gwConfig, config, gatewayMetadata(), options);
   }
 
   return getModelDirect(config, options.sessionAffinity);
@@ -380,7 +406,7 @@ export function getModel(env: Cloudflare.Env, config: AiModelConfig,
 // user's Cloudflare credits; no provider API key required.
 function getModelViaUserGateway(
   config: AiModelConfig,
-  metadata: GatewayMetadata,
+  metadata: string,
   userGateway: UserGatewayRouting,
   sessionAffinity?: string,
 ): ModelHandle {
@@ -442,10 +468,9 @@ function bindingFetch(binding: Ai): FetchFunction {
 function getModelViaGateway(
   gwConfig: AiGatewayConfig,
   config: AiModelConfig,
-  initiator: AiChatAuthorInfo,
+  metadata: string,
   options: ModelRoutingOptions,
 ): ModelHandle {
-  const metadata = buildMetadata(initiator, options.metadata);
   const binding = gwConfig.bindingFor(config.provider);
   // No binding means either the provider can't ride one or the deployment has none; the second
   // case already required a token in the constructor, so this only fires for the first
@@ -648,10 +673,11 @@ function getModelDirect(config: AiModelConfig, sessionAffinity?: string): ModelH
 // =======================================================================================
 
 export type LanguageModelGatekeeperProps = {
-  displayName: string,
-  config: AiModelConfig,
-  initiator: AiChatAuthorInfo,
-  metadata?: GatewayMetadataContext,
+  displayName: string;
+  config: AiModelConfig;
+  initiator: AiChatAuthorInfo;
+  trustedAccessEmail?: string;
+  metadata?: GatewayMetadataContext;
 };
 
 export class LanguageModelGatekeeper
@@ -682,11 +708,18 @@ export class LanguageModelGatekeeper
     return [];
   }
 
-  async startSession(approvalQueue: RpcStub<ApprovalQueue>)
-      : Promise<LanguageModelBinding> {
-    let model = getModel(this.env, this.ctx.props.config, this.ctx.props.initiator, {
-      metadata: this.ctx.props.metadata,
-    });
+  async startSession(
+    approvalQueue: RpcStub<ApprovalQueue>,
+  ): Promise<LanguageModelBinding> {
+    let model = getModel(
+      this.env,
+      this.ctx.props.config,
+      this.ctx.props.initiator,
+      {
+        trustedAccessEmail: this.ctx.props.trustedAccessEmail,
+        metadata: this.ctx.props.metadata,
+      },
+    );
     return new LanguageModelBindingImpl(model);
   }
 
@@ -696,8 +729,11 @@ export class LanguageModelGatekeeper
   rejectAction(action: number): Promise<void | {restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
-  revertAction(action: number):
-      Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
+  revertAction(action: number): Promise<void | {
+    message?: string;
+    canRetry?: boolean;
+    restart?: boolean;
+  }> {
     throw new Error("This gatekeeper implements no actions.");
   }
 

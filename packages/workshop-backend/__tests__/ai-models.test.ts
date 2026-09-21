@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { AiChatAuthorInfo, AiModelConfig } from "@gadgets/workshop-shared/api";
-import { getModel, type ModelHandle } from "../src/ai-models.js";
+import type {
+  AiChatAuthorInfo,
+  AiModelConfig,
+} from "@gadgets/workshop-shared/api";
+import {
+  getModel,
+  type ModelHandle,
+  type ModelStreamOptions,
+} from "../src/ai-models.js";
 
 // These tests exercise the real pi-ai stack: no module mocks. Routing decisions are asserted on
 // the returned handle's model descriptor (baseUrl/id/api) and log route, and request-level
@@ -55,10 +62,17 @@ const fetchStub = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 // Runs one request through the handle with the fetch stub and returns what was sent.
-async function captureRequest(handle: ModelHandle): Promise<CapturedRequest> {
-  const stream = await handle.stream(handle.model, {
-    messages: [{ role: "user", content: "hello", timestamp: 0 }],
-  }, { fetch: fetchStub, maxRetries: 0 });
+async function captureRequest(
+  handle: ModelHandle,
+  options: ModelStreamOptions = {},
+): Promise<CapturedRequest> {
+  const stream = await handle.stream(
+    handle.model,
+    {
+      messages: [{ role: "user", content: "hello", timestamp: 0 }],
+    },
+    { ...options, fetch: fetchStub, maxRetries: 0 },
+  );
   const message = await stream.result();
   expect(message.stopReason).toBe("error");
   expect(capturedRequests.length).toBeGreaterThan(0);
@@ -72,6 +86,7 @@ describe("getModel AI Gateway routing", () => {
 
   it("routes non-Workers providers through the platform gateway", async () => {
     const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {
+      trustedAccessEmail: "person@example.com",
       metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },
     });
 
@@ -94,12 +109,15 @@ describe("getModel AI Gateway routing", () => {
     expect(request.headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
     expect(request.headers.get("x-api-key")).toBeNull();
     expect(request.headers.get("authorization")).toBeNull();
-    expect(JSON.parse(request.headers.get("cf-aig-metadata")!)).toEqual({
-      user: "user-123",
-      source: "chat",
-      gadgetId: "gadget-123",
-      chatId: 7,
-    });
+    expect(request.headers.get("cf-aig-metadata")).toBe(
+      JSON.stringify({
+        user_email: "person@example.com",
+        application: "peer-point-os",
+        source: "chat",
+        gadget_id: "gadget-123",
+        chat_id: 7,
+      }),
+    );
   }, 15000);
 
   it("routes Google through the gateway's google-ai-studio passthrough", () => {
@@ -126,17 +144,68 @@ describe("getModel AI Gateway routing", () => {
 
   it("preserves gadget automation metadata", async () => {
     const handle = getModel(env(), ANTHROPIC_CONFIG, GADGET_INITIATOR, {
+      trustedAccessEmail: "owner@example.com",
       metadata: { source: "thread-title", gadgetId: "gadget-456", chatId: 8 },
     });
 
     const request = await captureRequest(handle);
-    expect(JSON.parse(request.headers.get("cf-aig-metadata")!)).toEqual({
-      user: "owner-456",
-      source: "thread-title",
-      gadgetId: "gadget-456",
-      chatId: 8,
-      automated: true,
+    expect(request.headers.get("cf-aig-metadata")).toBe(
+      JSON.stringify({
+        user_email: "owner@example.com",
+        application: "peer-point-os",
+        source: "thread-title",
+        gadget_id: "gadget-456",
+        chat_id: 8,
+      }),
+    );
+  }, 15000);
+
+  it("overrides spoofed gateway metadata headers with trusted metadata", async () => {
+    const handle = getModel(env(), ANTHROPIC_CONFIG, INITIATOR, {
+      trustedAccessEmail: "person@example.com",
+      metadata: { source: "binding-name", gadgetId: "gadget-123" },
     });
+
+    const request = await captureRequest(handle, {
+      headers: {
+        "CF-AIG-METADATA": JSON.stringify({
+          user_email: "attacker@example.com",
+        }),
+      },
+    });
+    expect(request.headers.get("cf-aig-metadata")).toBe(
+      JSON.stringify({
+        user_email: "person@example.com",
+        application: "peer-point-os",
+        source: "binding-name",
+        gadget_id: "gadget-123",
+      }),
+    );
+  }, 15000);
+
+  it("fails closed without trusted email on Access gateway routes", () => {
+    const accessEnv = env({ CF_ACCESS_AUD: "access-audience" });
+    expect(() => getModel(accessEnv, ANTHROPIC_CONFIG, INITIATOR)).toThrow(
+      "A verified Cloudflare Access email is required for AI Gateway requests.",
+    );
+    expect(() =>
+      getModel(accessEnv, ANTHROPIC_CONFIG, INITIATOR, {
+        userGateway: { accountId: "user-account-id", apiKey: "user-token" },
+      }),
+    ).toThrow(
+      "A verified Cloudflare Access email is required for AI Gateway requests.",
+    );
+  });
+
+  it("allows generic gateway mode to omit user email", async () => {
+    const request = await captureRequest(
+      getModel(env(), ANTHROPIC_CONFIG, INITIATOR),
+    );
+    expect(request.headers.get("cf-aig-metadata")).toBe(
+      JSON.stringify({
+        application: "peer-point-os",
+      }),
+    );
   }, 15000);
 
   it("requires the gateway account id whenever gateway mode is enabled", () => {
@@ -153,6 +222,7 @@ describe("getModel AI Gateway routing", () => {
   it("prioritizes a connected user's Gateway over platform routing", async () => {
     const handle = getModel(env(), WORKERS_AI_CONFIG, INITIATOR, {
       userGateway: { accountId: "user-account-id", apiKey: "user-token" },
+      trustedAccessEmail: "person@example.com",
       metadata: { source: "chat", gadgetId: "gadget-789", chatId: 9 },
     });
 
@@ -171,15 +241,21 @@ describe("getModel AI Gateway routing", () => {
 
     const request = await captureRequest(handle);
     expect(request.url).toBe(
-        "https://gateway.ai.cloudflare.com/v1/user-account-id/default/workers-ai/v1/" +
-        "chat/completions");
-    expect(request.headers.get("cf-aig-authorization")).toBe("Bearer user-token");
-    expect(JSON.parse(request.headers.get("cf-aig-metadata")!)).toEqual({
-      user: "user-123",
-      source: "chat",
-      gadgetId: "gadget-789",
-      chatId: 9,
-    });
+      "https://gateway.ai.cloudflare.com/v1/user-account-id/default/workers-ai/v1/" +
+        "chat/completions",
+    );
+    expect(request.headers.get("cf-aig-authorization")).toBe(
+      "Bearer user-token",
+    );
+    expect(request.headers.get("cf-aig-metadata")).toBe(
+      JSON.stringify({
+        user_email: "person@example.com",
+        application: "peer-point-os",
+        source: "chat",
+        gadget_id: "gadget-789",
+        chat_id: 9,
+      }),
+    );
   }, 15000);
 
   it("speaks the provider's native API on a connected user's Gateway", async () => {
@@ -290,6 +366,7 @@ describe("getModel AI Gateway binding transport", () => {
 
   it("drives Anthropic through the binding with no API token", async () => {
     const handle = getModel(bindingEnv(), ANTHROPIC_CONFIG, INITIATOR, {
+      trustedAccessEmail: "person@example.com",
       metadata: { source: "chat", gadgetId: "gadget-123", chatId: 7 },
     });
 
@@ -312,13 +389,18 @@ describe("getModel AI Gateway binding transport", () => {
     const headerNames = Object.keys(entry.headers).map((name) => name.toLowerCase());
     expect(headerNames).not.toContain("x-api-key");
     expect(headerNames).not.toContain("authorization");
-    expect(JSON.parse(entry.headers["cf-aig-metadata"])).toEqual({
-      user: "user-123",
-      source: "chat",
-      gadgetId: "gadget-123",
-      chatId: 7,
-    });
-    expect((JSON.parse(entry.body) as { model: string }).model).toBe("claude-sonnet-4-5");
+    expect(entry.headers["cf-aig-metadata"]).toBe(
+      JSON.stringify({
+        user_email: "person@example.com",
+        application: "peer-point-os",
+        source: "chat",
+        gadget_id: "gadget-123",
+        chat_id: 7,
+      }),
+    );
+    expect((JSON.parse(entry.body) as { model: string }).model).toBe(
+      "claude-sonnet-4-5",
+    );
   }, 15000);
 
   it("drives Workers AI through the binding via its gateway route", async () => {

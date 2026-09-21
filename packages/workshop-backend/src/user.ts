@@ -99,6 +99,7 @@ export type UserAiModelRecord = {
 
 export type UserChatContext = {
   profile: AiChatAuthorInfo;
+  trustedAccessEmail?: string;
   aiModel?: UserAiModelRecord;
   quickModel?: AiModelConfig;
 }
@@ -229,6 +230,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
         name: "User",
         id: "user@example.com",
       },
+      trustedAccessEmail: <string | null>null,
       quickModel: <string | null>null,
       preferredModel: <string | null>null,
       onboardingCompleted: false,
@@ -401,6 +403,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         id: email,
       });
     }
+    this.storage.trustedAccessEmail.put(email);
     this.#syncDirectory();
     return isNew;
   }
@@ -759,7 +762,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let gwConfig = getAiGatewayConfig(this.env);
 
     let result: UserChatContext = {
-      profile: this.storage.profile.get()
+      profile: this.storage.profile.get(),
+      trustedAccessEmail: this.storage.trustedAccessEmail.get() ?? undefined,
     };
     if (modelId) {
       // In AI Gateway mode, resolve gateway models first.
