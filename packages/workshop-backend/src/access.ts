@@ -39,10 +39,18 @@ export async function verifyCfAccessJwt(
   }
 }
 
+/** Extracts a non-empty, normalized email from verified Cloudflare Access claims. */
+export function accessEmail(payload: JWTPayload): string | null {
+  if (typeof payload.email !== "string") return null;
+  const email = payload.email.trim();
+  return email || null;
+}
+
 /** Returns a privacy-preserving limiter key derived only from verified Access claims. */
 export async function accessRateLimitKey(payload: JWTPayload): Promise<string | null> {
   if (payload.sub) return `access-sub:${payload.sub}`;
-  if (typeof payload.email !== "string" || payload.email.length === 0) return null;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload.email));
+  const email = accessEmail(payload);
+  if (!email) return null;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(email));
   return `access-email:${new Uint8Array(digest).toHex()}`;
 }

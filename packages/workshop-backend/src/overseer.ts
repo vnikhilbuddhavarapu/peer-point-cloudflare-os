@@ -1910,10 +1910,12 @@ class OverseerImpl implements AgentHooks {
   // by replaying the persisted chat log.
   async #resumeAgent(record: ActiveAgentRecord, liveChat: LiveChatContext) {
     let aiModel: UserAiModelRecord | undefined;
+    let trustedAccessEmail: string | undefined;
     try {
       let user = this.users.get(this.users.idFromString(record.initiatorUserId));
       let userMeta = await user.getChatContext(record.modelId);
       aiModel = userMeta.aiModel;
+      trustedAccessEmail = userMeta.trustedAccessEmail;
     } catch (err) {
       this.logger.error("error resolving model while resuming agent", {
         event: "agent.resume.model.resolve.failed",
@@ -1940,7 +1942,13 @@ class OverseerImpl implements AgentHooks {
     }
 
     await this.#runAgentTurn(
-        record.chatId, aiModel, record.initiator, record.callbackInitiated, liveChat);
+      record.chatId,
+      aiModel,
+      record.initiator,
+      trustedAccessEmail,
+      record.callbackInitiated,
+      liveChat,
+    );
   }
 
   // The hand-off once a chat's turn is over and its running-agent state has been torn down: drop
@@ -4723,7 +4731,12 @@ class OverseerImpl implements AgentHooks {
     // merge with code -- including an accepted creation's empty first commit -- still sees
     // isFirstChange and generates the title then.)
     if (isFirstChange && commits.length > 0 && userMeta.quickModel) {
-      this.generateGadgetTitle(chatId, userMeta.quickModel, userMeta.profile);
+      this.generateGadgetTitle(
+        chatId,
+        userMeta.quickModel,
+        userMeta.profile,
+        userMeta.trustedAccessEmail,
+      );
     }
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
@@ -6678,15 +6691,28 @@ class OverseerImpl implements AgentHooks {
 
     if (prepared.message !== undefined && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
-      this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
+      this.startAgent(
+        chatId,
+        userMeta.aiModel,
+        userMeta.profile,
+        clientUser.id.toString(),
+        userMeta.trustedAccessEmail,
+        false,
+        needsAgentTurnKeepAlive,
+      );
     }
 
     if (userMeta.quickModel) {
       let titleMessage = prepared.message?.trim() || prepared.slashCommand?.args.trim() ||
         prepared.skillName || (prepared.slashCommand ? "Slash command" : "") ||
         `[user attached ${canonicalAttachments?.length ?? 0} attachment(s)]`;
-      this.generateThreadTitle(chatId, titleMessage, userMeta.quickModel, userMeta.profile);
+      this.generateThreadTitle(
+        chatId,
+        titleMessage,
+        userMeta.quickModel,
+        userMeta.profile,
+        userMeta.trustedAccessEmail,
+      );
     }
 
     this.recordGadgetAnalytics({
@@ -6753,8 +6779,15 @@ class OverseerImpl implements AgentHooks {
 
     if (runsAgentTurn && userMeta.aiModel) {
       let needsAgentTurnKeepAlive = responseTargetRegistration !== undefined;
-      this.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                      clientUser.id.toString(), false, needsAgentTurnKeepAlive);
+      this.startAgent(
+        chatId,
+        userMeta.aiModel,
+        userMeta.profile,
+        clientUser.id.toString(),
+        userMeta.trustedAccessEmail,
+        false,
+        needsAgentTurnKeepAlive,
+      );
     }
     this.recordGadgetAnalytics({
       event_name: "gadget_interaction",
@@ -7060,10 +7093,15 @@ class OverseerImpl implements AgentHooks {
   // the turn can be resumed after a server restart, and tracks the turn so the keep-alive alarm is
   // held while it runs. `initiatorUserId` is the hex DO ID of the user whose model/account is used,
   // needed to re-resolve the model config on resume.
-  startAgent(chatId: number, aiModel: UserAiModelRecord,
-             initiator: AiChatAuthorInfo, initiatorUserId: string,
-             callbackInitiated: boolean = false,
-             keepAlive: boolean = false): void {
+  startAgent(
+    chatId: number,
+    aiModel: UserAiModelRecord,
+    initiator: AiChatAuthorInfo,
+    initiatorUserId: string,
+    trustedAccessEmail: string | undefined,
+    callbackInitiated: boolean = false,
+    keepAlive: boolean = false,
+  ): void {
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -7076,27 +7114,54 @@ class OverseerImpl implements AgentHooks {
     });
 
     let liveChat = this.#getLiveChat(chatId);
-    let turn = this.#runAgentTurn(chatId, aiModel, initiator, callbackInitiated, liveChat);
+    let turn = this.#runAgentTurn(
+      chatId,
+      aiModel,
+      initiator,
+      trustedAccessEmail,
+      callbackInitiated,
+      liveChat,
+    );
     if (keepAlive) this.ctx.waitUntil(turn);
   }
 
-  #runAgentTurn(chatId: number, aiModel: UserAiModelRecord,
-                initiator: AiChatAuthorInfo,
-                callbackInitiated: boolean,
-                liveChat: LiveChatContext): Promise<void> {
-    return obsContext.with({
-      operation: "agent.run",
-      gadgetId: this.ctx.id.toString(),
-      chatId,
-      modelId: aiModel.profile.id,
-    }, () => traced("agent.run", () => this.#runAgentTurnWithContext(
-        chatId, aiModel, initiator, callbackInitiated, liveChat)));
+  #runAgentTurn(
+    chatId: number,
+    aiModel: UserAiModelRecord,
+    initiator: AiChatAuthorInfo,
+    trustedAccessEmail: string | undefined,
+    callbackInitiated: boolean,
+    liveChat: LiveChatContext,
+  ): Promise<void> {
+    return obsContext.with(
+      {
+        operation: "agent.run",
+        gadgetId: this.ctx.id.toString(),
+        chatId,
+        modelId: aiModel.profile.id,
+      },
+      () =>
+        traced("agent.run", () =>
+          this.#runAgentTurnWithContext(
+            chatId,
+            aiModel,
+            initiator,
+            trustedAccessEmail,
+            callbackInitiated,
+            liveChat,
+          ),
+        ),
+    );
   }
 
-  async #runAgentTurnWithContext(chatId: number, aiModel: UserAiModelRecord,
-                                 initiator: AiChatAuthorInfo,
-                                 callbackInitiated: boolean,
-                                 liveChat: LiveChatContext): Promise<void> {
+  async #runAgentTurnWithContext(
+    chatId: number,
+    aiModel: UserAiModelRecord,
+    initiator: AiChatAuthorInfo,
+    trustedAccessEmail: string | undefined,
+    callbackInitiated: boolean,
+    liveChat: LiveChatContext,
+  ): Promise<void> {
     // When this turn is billed to the user's own Cloudflare account, we refresh their cached credit
     // balance once the turn completes (see the `finally` below) so the next billing decision
     // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
@@ -7152,13 +7217,16 @@ class OverseerImpl implements AgentHooks {
         }
       }
 
-      let sessionAffinity = await computeSessionAffinity(this.ctx.id.toString(), chatId);
-      let chosenModel = getModel(
-          this.env, aiModel.config, initiator, {
-            sessionAffinity,
-            userGateway: byokRouting,
-            metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
-          });
+      let sessionAffinity = await computeSessionAffinity(
+        this.ctx.id.toString(),
+        chatId,
+      );
+      let chosenModel = getModel(this.env, aiModel.config, initiator, {
+        sessionAffinity,
+        userGateway: byokRouting,
+        trustedAccessEmail,
+        metadata: { source: "chat", gadgetId: this.ctx.id.toString(), chatId },
+      });
 
       let controller = liveChat.cancelController;
       controller.signal.throwIfAborted();
@@ -7417,8 +7485,14 @@ class OverseerImpl implements AgentHooks {
       meta.activeAgent = userMeta.aiModel.profile;
       meta.lastActive = this.getChatTimestamp();
       this.storage.chatMeta.put(meta);
-      this.startAgent(chatId, userMeta.aiModel, author, initiatorUserId,
-                      /* callbackInitiated */ true);
+      this.startAgent(
+        chatId,
+        userMeta.aiModel,
+        author,
+        initiatorUserId,
+        userMeta.trustedAccessEmail,
+        /* callbackInitiated */ true,
+      );
     } catch (err) {
       this.logger.error("failed to deliver pending agent calls", {
         event: "agent.callback.start.failed", error: err, chatId,
@@ -7579,7 +7653,9 @@ class OverseerImpl implements AgentHooks {
       // names). This may overclaim relative to eventual seeding -- which drops dangling targets
       // and allowlisted names missing from the default list -- but overclaiming is harmless for
       // the dedupe/validation this set serves.
-      let env = context.spawnerConfig.env as Record<string, WorkpieceId> | string[];
+      let env = context.spawnerConfig.env as
+        | Record<string, WorkpieceId>
+        | string[];
       taken = new Set(Array.isArray(env) ? env : Object.keys(env));
     } else {
       // Unseeded normal chat (or an old-style spawned chat with no allowlist, historically
@@ -7620,10 +7696,19 @@ class OverseerImpl implements AgentHooks {
   // undefined on any failure (error, timeout, invalid or colliding output) so the caller can
   // fall back to a deterministic name.
   async generateBindingName(
-      subject: string, takenNames: Set<string>,
-      quick: {config: AiModelConfig, initiator: AiChatAuthorInfo}): Promise<string | undefined> {
+    subject: string,
+    takenNames: Set<string>,
+    quick: {
+      config: AiModelConfig;
+      initiator: AiChatAuthorInfo;
+      trustedAccessEmail?: string;
+    },
+  ): Promise<string | undefined> {
     try {
-      let model = getModel(this.env, quick.config, quick.initiator);
+      let model = getModel(this.env, quick.config, quick.initiator, {
+        trustedAccessEmail: quick.trustedAccessEmail,
+        metadata: { source: "binding-name", gadgetId: this.ctx.id.toString() },
+      });
       let result = await completeText(model, {
         signal: AbortSignal.timeout(10_000),
         prompt:
@@ -7655,16 +7740,26 @@ class OverseerImpl implements AgentHooks {
   // runs at most once per legacy message) and resolved from the workspace owner's account.
   // Returns undefined when no quick model is configured (callers fall back to deterministic
   // names).
-  async #getNamingQuickModel()
-      : Promise<{config: AiModelConfig, initiator: AiChatAuthorInfo} | undefined> {
+  async #getNamingQuickModel(): Promise<
+    | {
+        config: AiModelConfig;
+        initiator: AiChatAuthorInfo;
+        trustedAccessEmail?: string;
+      }
+    | undefined
+  > {
     if (!this.ownerId) return undefined;
     try {
       // Pure read on a fresh-stub getter: safe to retry once across a user-DO reset.
       let userMeta = await retryOnDoReset(
           () => this.#ownerUserDo().getChatContext(null), this.logger);
       return userMeta.quickModel
-          ? {config: userMeta.quickModel, initiator: userMeta.profile}
-          : undefined;
+        ? {
+            config: userMeta.quickModel,
+            initiator: userMeta.profile,
+            trustedAccessEmail: userMeta.trustedAccessEmail,
+          }
+        : undefined;
     } catch (err) {
       this.logger.warn("failed to resolve quick model for binding naming", {
         event: "chat.binding.name.quick.model.failed", error: err,
@@ -7714,7 +7809,9 @@ class OverseerImpl implements AgentHooks {
         // default binding list, mirroring how the storage migration rewrites stored spawner
         // records.
         let env = context.spawnerConfig.env as
-            Record<string, WorkpieceId> | string[] | undefined;
+          | Record<string, WorkpieceId>
+          | string[]
+          | undefined;
         if (env === undefined || Array.isArray(env)) {
           for (let [name, target] of Object.entries(this.defaultBindingList())) {
             if (env === undefined || env.includes(name)) seed[name] = target;
@@ -8029,7 +8126,9 @@ class OverseerImpl implements AgentHooks {
       // description and no resource suggestion. Legacy records may carry an `included:
       // false` flag; honor it for backwards compatibility, but the current UI no longer
       // surfaces an exclusion control.
-      let annotation = edge.blueprintAnnotation as LegacyBlueprintBindingAnnotation | undefined;
+      let annotation = edge.blueprintAnnotation as
+        | LegacyBlueprintBindingAnnotation
+        | undefined;
       if (annotation?.included === false) continue;
 
       let spec = gk.creationSpec;
@@ -8311,12 +8410,21 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Auto-generate a title for the given
-  async generateThreadTitle(chatId: number, initialMessage: string,
-                            modelConfig: AiModelConfig,
-                            initiator: AiChatAuthorInfo): Promise<void> {
+  async generateThreadTitle(
+    chatId: number,
+    initialMessage: string,
+    modelConfig: AiModelConfig,
+    initiator: AiChatAuthorInfo,
+    trustedAccessEmail?: string,
+  ): Promise<void> {
     try {
       let model = getModel(this.env, modelConfig, initiator, {
-        metadata: { source: "thread-title", gadgetId: this.ctx.id.toString(), chatId },
+        trustedAccessEmail,
+        metadata: {
+          source: "thread-title",
+          gadgetId: this.ctx.id.toString(),
+          chatId,
+        },
       });
 
       let result = await completeText(model, {
@@ -8361,8 +8469,12 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Generate a title for the whole gadget, called only after code starts being written.
-  async generateGadgetTitle(chatId: number, modelConfig: AiModelConfig,
-                            initiator: AiChatAuthorInfo) {
+  async generateGadgetTitle(
+    chatId: number,
+    modelConfig: AiModelConfig,
+    initiator: AiChatAuthorInfo,
+    trustedAccessEmail?: string,
+  ) {
     try {
       let parts: string[] = [];
 
@@ -8373,7 +8485,12 @@ class OverseerImpl implements AgentHooks {
       }
 
       let model = getModel(this.env, modelConfig, initiator, {
-        metadata: { source: "gadget-title", gadgetId: this.ctx.id.toString(), chatId },
+        trustedAccessEmail,
+        metadata: {
+          source: "gadget-title",
+          gadgetId: this.ctx.id.toString(),
+          chatId,
+        },
       });
 
       let gadgetTitle = await completeText(model, {
@@ -8949,8 +9066,11 @@ class OverseerImpl implements AgentHooks {
   // bindings the blueprint's code expects the agent to wire up, for instantiation as a new gadget
   // by the agent's createGadget tool. Blueprint ids are bearer capabilities (like blueprint share
   // links), so possession of the id is sufficient to read it. Throws agent-readable errors.
-  async fetchBlueprint(blueprintId: string)
-      : Promise<{files: Record<string, string>, notes: string, output?: BlueprintOutput}> {
+  async fetchBlueprint(blueprintId: string): Promise<{
+    files: Record<string, string>;
+    notes: string;
+    output?: BlueprintOutput;
+  }> {
     let kvRecord = await readBlueprintKvRecord(this.env, blueprintId);
     if (!kvRecord) {
       throw new Error(`No such blueprint: ${blueprintId}. Use listBlueprints to see available ` +
@@ -10202,7 +10322,13 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     if (userMeta.aiModel) {
       // Fire off the agent (asynchronously).
-      this.impl.startAgent(chatId, userMeta.aiModel, author, initiatorUserId);
+      this.impl.startAgent(
+        chatId,
+        userMeta.aiModel,
+        author,
+        initiatorUserId,
+        userMeta.trustedAccessEmail,
+      );
     } else {
       // TODO: Flag as needing user attention.
     }
@@ -10462,8 +10588,11 @@ export class GadgetTailLoopback extends WorkerEntrypoint<Cloudflare.Env, GadgetT
    * New-style streaming tail worker. Delivers gadget console logs to the product UI in real time.
    * Do not console.log the tail events here — they spam wrangler dev and are not ops logs.
    */
-  tailStream(event: TailStream.TailEvent<TailStream.Onset>)
-      : TailStream.TailEventHandlerType | Promise<TailStream.TailEventHandlerType> {
+  tailStream(
+    event: TailStream.TailEvent<TailStream.Onset>,
+  ):
+    | TailStream.TailEventHandlerType
+    | Promise<TailStream.TailEventHandlerType> {
     return {
       log: (event: TailStream.TailEvent<TailStream.Log>) => {
         let log: ConsoleLogEvent = {
@@ -10791,8 +10920,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       let userMeta = await retryOnDoReset(
           () => this.#clientUser.getChatContext(null), this.impl.logger);
       if (userMeta.quickModel) {
-        bindingName = await this.impl.generateBindingName(
-            title, taken, {config: userMeta.quickModel, initiator: userMeta.profile});
+        bindingName = await this.impl.generateBindingName(title, taken, {
+          config: userMeta.quickModel,
+          initiator: userMeta.profile,
+          trustedAccessEmail: userMeta.trustedAccessEmail,
+        });
       }
       bindingName ??= fallbackBindingName("GADGET", name => taken.has(name));
     } else if (chatNames?.has(bindingName)) {
@@ -10969,8 +11101,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         id: chatMeta.profile.id,
         name: this.impl.storage.title.get(),
       },
-      metadata: { source: "model-binding", gadgetId: this.impl.ctx.id.toString() },
-    }
+      trustedAccessEmail: chatMeta.trustedAccessEmail,
+      metadata: {
+        source: "model-binding",
+        gadgetId: this.impl.ctx.id.toString(),
+      },
+    };
 
     let creationSpec: GatekeeperCreationSpec = {
       type: "aiModel",
@@ -11363,8 +11499,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     fresh.lastActive = this.impl.getChatTimestamp();
     this.impl.storage.chatMeta.put(fresh);
 
-    this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                         this.#clientUser.id.toString());
+    this.impl.startAgent(
+      chatId,
+      userMeta.aiModel,
+      userMeta.profile,
+      this.#clientUser.id.toString(),
+      userMeta.trustedAccessEmail,
+    );
   }
 
   async acceptConnectionRequest(
@@ -11841,8 +11982,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     meta.lastActive = this.impl.getChatTimestamp();
     this.impl.storage.chatMeta.put(meta);
 
-    this.impl.startAgent(chatId, userMeta.aiModel, userMeta.profile,
-                         this.#clientUser.id.toString());
+    this.impl.startAgent(
+      chatId,
+      userMeta.aiModel,
+      userMeta.profile,
+      this.#clientUser.id.toString(),
+      userMeta.trustedAccessEmail,
+    );
   }
 
   async finalizeChatDraft(chatId: number): Promise<void> {
@@ -12996,8 +13142,11 @@ export class AgentSpawnerGatekeeper
   rejectAction(action: number): Promise<void | {restart?: boolean}> {
     throw new Error("This gatekeeper implements no actions.");
   }
-  revertAction(action: number):
-      Promise<void | {message?: string, canRetry?: boolean, restart?: boolean}> {
+  revertAction(action: number): Promise<void | {
+    message?: string;
+    canRetry?: boolean;
+    restart?: boolean;
+  }> {
     throw new Error("This gatekeeper implements no actions.");
   }
 

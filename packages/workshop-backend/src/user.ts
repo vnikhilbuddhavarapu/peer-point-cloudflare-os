@@ -1,18 +1,73 @@
 import { RpcStub } from "capnweb";
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
-import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
+import {
+  GadgetMetadataWithTimestamps,
+  AiChatAuthorInfo,
+  AiModelConfig,
+  CollaboratorRole,
+  ConnectedAccountsSubscriber,
+  ConnectedAccountsFilter,
+  GatekeeperVendorFilter,
+  GadgetMetadata,
+  BlueprintMetadata,
+  BlueprintLibrarySummary,
+  BlueprintSource,
+  BlueprintUserSummary,
+  BLUEPRINT_SCREENSHOT_R2_PREFIX,
+  GatekeeperVendorInfo,
+  BlueprintOutput,
+  OutputSummary,
+  WorkpieceId,
+  ListOutputsResult,
+  AUTH_ERROR_CODES,
+  createAuthError,
+  ConnectFlowStart,
+} from "@gadgets/workshop-shared/api";
+import {
+  Gatekeeper,
+  GatekeeperUser,
+  GatekeeperUserVerifier,
+  GatekeeperVendor,
+  AccountDescription,
+  VendorDescription,
+  GatekeeperConnectCallback,
+  ConnectHandoff,
+  SupportedResource,
+  ResourceConfiguratorFrame,
+  AppUiContext,
+  GatekeeperUiFrame,
+} from "@gadgets/workshop-shared/gatekeeper";
+import {
+  shouldAutoProvisionAccount,
+  ambientGatekeeperMode,
+} from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { createWorkshopLogger } from "./observability";
 import { getAiGatewayConfig } from "./ai-gateway.js";
-import { utcDayKey, nextUtcMidnightIso, DailyQuotaResult } from "./ai-gateway-billing/limits/config.js";
+import {
+  utcDayKey,
+  nextUtcMidnightIso,
+  DailyQuotaResult,
+} from "./ai-gateway-billing/limits/config.js";
 import type { AdminSettings } from "./admin-settings.js";
-import { isReservedBlueprintKey, readBlueprintKvRecord } from "./blueprint-archive.js";
-import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
+import {
+  isReservedBlueprintKey,
+  readBlueprintKvRecord,
+} from "./blueprint-archive.js";
+import {
+  filterEnabledResources,
+  isResourceDisabled,
+  readAdminConfig,
+} from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
-import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
+import {
+  CONNECT_FLOW_LIFETIME_MS,
+  handoffTargetOrigin,
+  hashPresentedSecret,
+  newSecretToken,
+  PENDING_HANDOFF_LIFETIME_MS,
+} from "./connect-handoff.js";
 
 const logger = createWorkshopLogger("workshop.user");
 
@@ -24,9 +79,9 @@ type ConnectedAccountRecord = {
   id: number;
   account: Fetcher<GatekeeperUser>;
   description: AccountDescription;
-  vendorId: string;   // Derived from the GATEKEEPER_ binding name (e.g. "google", "email").
-  credentialExpiresAt?: Date;    // When credentials are expected to expire, if known.
-  credentialsExpired?: boolean;  // Set true by async notification from gatekeeper.
+  vendorId: string; // Derived from the GATEKEEPER_ binding name (e.g. "google", "email").
+  credentialExpiresAt?: Date; // When credentials are expected to expire, if known.
+  credentialsExpired?: boolean; // Set true by async notification from gatekeeper.
   // True if the Workshop created this account automatically via GatekeeperVendor.createAccount()
   // (no OAuth flow), rather than the user connecting it. Such accounts are protected from manual
   // disconnect, since deleting one permanently destroys the user's data in that gatekeeper.
@@ -43,7 +98,10 @@ type PendingHandoffRecord = {
   expiresAt: Date;
   credentialExpiresAt?: Date;
   // The staged account, present for `kind: "connect"` only; becomes the ConnectedAccountRecord.
-  connect?: Pick<ConnectedAccountRecord, "account" | "description" | "vendorId">;
+  connect?: Pick<
+    ConnectedAccountRecord,
+    "account" | "description" | "vendorId"
+  >;
   // The gatekeeper's id for the staged credentials, present for `kind: "restore"` only; passed back
   // in commitReconnect() so this ticket can activate no other stage's credentials.
   stageId?: string;
@@ -65,7 +123,7 @@ type PendingConnectFlow = {
 export type ProvidedAccountInfo = {
   accountId: number;
   vendorId: string;
-  description: AccountDescription;   // carries `singleton` / `providesUi` declarations
+  description: AccountDescription; // carries `singleton` / `providesUi` declarations
 };
 
 // The singleton/UI methods (createAccount on GatekeeperVendor; getSingletonGatekeeperClass /
@@ -78,11 +136,17 @@ export type ProvidedAccountInfo = {
 // shape keeps the methods' declared return types (e.g. createAccount's Fetcher<GatekeeperUser>)
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
-type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
+type SingletonAccountStub = Required<
+  Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">
+>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
-  if (record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
+  if (
+    record.credentialExpiresAt &&
+    record.credentialExpiresAt.valueOf() < Date.now()
+  )
+    return false;
   return true;
 }
 
@@ -95,18 +159,19 @@ export const CLOUDFLARE_VENDOR_ID = "cloudflare";
 export type UserAiModelRecord = {
   profile: AiChatAuthorInfo;
   config: AiModelConfig;
-}
+};
 
 export type UserChatContext = {
   profile: AiChatAuthorInfo;
+  trustedAccessEmail?: string;
   aiModel?: UserAiModelRecord;
   quickModel?: AiModelConfig;
-}
+};
 
 type LoginSessionRecord = {
-  tokenId: string,  // sha256 hash of token, hex-formatted
-  created: Date,
-}
+  tokenId: string; // sha256 hash of token, hex-formatted
+  created: Date;
+};
 
 // Blueprint record stored in the user's `blueprints` collection.
 type BlueprintUserRecord = {
@@ -126,7 +191,7 @@ type LibraryBlueprintRecord = {
 
 type GadgetRecord = GadgetMetadata & {
   created: Date;
-  lastActive?: Date;  // if missing, gadget is provisional
+  lastActive?: Date; // if missing, gadget is provisional
   // If we're not the gadget owner (it was shared with us), `owner` is set (inherited from
   // GadgetMetadata).
 };
@@ -184,13 +249,13 @@ function makeUserStorage(storage: DurableObjectStorage) {
   return createTypedStorage(storage, {
     collections: {
       aiModels: collection<UserAiModelRecord>()({
-        primaryKey: record => record.profile.id,
+        primaryKey: (record) => record.profile.id,
       }),
       gadgets: collection<GadgetRecord>()({
-        primaryKey: "id"
+        primaryKey: "id",
       }),
       connectedAccounts: collection<ConnectedAccountRecord>()({
-        primaryKey: "id"
+        primaryKey: "id",
       }),
       sessions: collection<LoginSessionRecord>()({
         primaryKey: "tokenId",
@@ -212,9 +277,11 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // corresponding `gadgets` record exists; `syncWorkspaceOutputs()` and the `gadgets` deletion
       // paths keep the two in step.
       outputs: collection<OutputRecord>()({
-        primaryKey: record => `${record.workspaceId}:${record.workpieceId}`,
+        primaryKey: (record) => `${record.workspaceId}:${record.workpieceId}`,
         nonUniqueIndexes: {
-          byWorkspace(record: OutputRecord) { return record.workspaceId; },
+          byWorkspace(record: OutputRecord) {
+            return record.workspaceId;
+          },
         },
       }),
     },
@@ -229,6 +296,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
         name: "User",
         id: "user@example.com",
       },
+      trustedAccessEmail: <string | null>null,
       quickModel: <string | null>null,
       preferredModel: <string | null>null,
       onboardingCompleted: false,
@@ -261,7 +329,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // (-1 = never, which also lazily backfills users created before the
       // directory existed). See #syncDirectory().
       directoryRev: -1,
-    }
+    },
   });
 }
 
@@ -282,9 +350,10 @@ function unavailableGatekeeperVendorInfo(id: string): GatekeeperVendorInfo {
 }
 
 async function checkGatekeeperVendorFilter(
-    vendor: Service<GatekeeperVendor> | Service<GatekeeperUser>,
-    vendorId: string,
-    filter: GatekeeperVendorFilter): Promise<boolean> {
+  vendor: Service<GatekeeperVendor> | Service<GatekeeperUser>,
+  vendorId: string,
+  filter: GatekeeperVendorFilter,
+): Promise<boolean> {
   try {
     if (filter.resourceUrl) {
       let resources = await vendor.getSupportedResources();
@@ -295,7 +364,9 @@ async function checkGatekeeperVendorFilter(
           //
           // TODO: Consider whether this is the API we want for getSupportedResources(). Is URLPattern
           //   even the right thing?
-          throw new Error("Gatekeeper returned non-string urlPattern from getSupportedResources()");
+          throw new Error(
+            "Gatekeeper returned non-string urlPattern from getSupportedResources()",
+          );
         }
 
         if (new URLPattern(resource.urlPattern).test(filter.resourceUrl)) {
@@ -312,7 +383,9 @@ async function checkGatekeeperVendorFilter(
     // them throws we don't want to block the whole list, so instead log the error and assume this
     // gatekeeper should be filtered.
     logger.warn("gatekeeper filter check failed", {
-      event: "gatekeeper.filter.check.failed", vendorId, error: err,
+      event: "gatekeeper.filter.check.failed",
+      vendorId,
+      error: err,
     });
     return false;
   }
@@ -329,7 +402,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Migrate data created prior to the minions -> gadgets rename.
     // TODO(cleanup): Eventually remove this, very few people ever used it as "minions".
-    for (let [key, value] of Array.from(ctx.storage.kv.list({prefix: "minions:"}))) {
+    for (let [key, value] of Array.from(
+      ctx.storage.kv.list({ prefix: "minions:" }),
+    )) {
       let newKey = "gadgets:" + key.slice("minions:".length);
       ctx.storage.kv.put(newKey, value);
       ctx.storage.kv.delete(key);
@@ -353,15 +428,19 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (rev === this.storage.directoryRev.get()) return;
     const profile = this.storage.profile.get();
     this.ctx.exports.UserDirectoryDurableObject.getByName("")
-        .syncUser({ id: profile.id, name: profile.name }, rev)
-        .then(() => {
-          if (rev > this.storage.directoryRev.get()) this.storage.directoryRev.put(rev);
-        }, (error: unknown) => {
+      .syncUser({ id: profile.id, name: profile.name }, rev)
+      .then(
+        () => {
+          if (rev > this.storage.directoryRev.get())
+            this.storage.directoryRev.put(rev);
+        },
+        (error: unknown) => {
           logger.warn("failed to sync user directory record", {
             event: "user.directory.sync.failed",
             error,
           });
-        });
+        },
+      );
   }
 
   async authenticate(token: string): Promise<void> {
@@ -373,7 +452,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       // not surface as the decoder's SyntaxError.
       throw createAuthError(AUTH_ERROR_CODES.invalidSessionToken);
     }
-    let hash = await crypto.subtle.digest('SHA-256', tokenBytes);
+    let hash = await crypto.subtle.digest("SHA-256", tokenBytes);
     let tokenId = new Uint8Array(hash).toHex();
     let session = this.storage.sessions.get(tokenId);
     if (!session) {
@@ -387,11 +466,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * exist and `allowCreate` is false (deployment signups are closed), refuses rather than creating —
    * existing users can still sign in.
    */
-  async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
+  async authenticateFromCfAccess(
+    email: string,
+    allowCreate: boolean,
+  ): Promise<boolean> {
     const isNew = !this.storage.created.get();
     if (isNew) {
       if (!allowCreate) {
-        throw new Error("New sign-ups are currently disabled on this deployment.");
+        throw new Error(
+          "New sign-ups are currently disabled on this deployment.",
+        );
       }
       // Create on first use.
       this.storage.created.put(true);
@@ -401,6 +485,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         id: email,
       });
     }
+    this.storage.trustedAccessEmail.put(email);
     this.#syncDirectory();
     return isNew;
   }
@@ -412,7 +497,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async login(passwordHash: Uint8Array): Promise<string | null> {
-    let passwordHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', passwordHash));
+    let passwordHashHash = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", passwordHash),
+    );
 
     let actualHashHash = this.storage.passwordHashHash.get();
     if (!actualHashHash) {
@@ -426,8 +513,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.#newSessionToken();
   }
 
-  async createAccount(username: string, displayName: string, passwordHash: Uint8Array)
-      : Promise<string | null> {
+  async createAccount(
+    username: string,
+    displayName: string,
+    passwordHash: Uint8Array,
+  ): Promise<string | null> {
     if (this.storage.created.get()) {
       return null;
     }
@@ -440,7 +530,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           gadget.created = new Date("2026-01-01");
         }
         if (!gadget.lastActive) {
-          gadget.lastActive = new Date("2026-01-01");;
+          gadget.lastActive = new Date("2026-01-01");
         }
         this.storage.gadgets.put(gadget);
       }
@@ -453,7 +543,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       id: username,
     });
 
-    let passwordHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', passwordHash));
+    let passwordHashHash = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", passwordHash),
+    );
     this.storage.passwordHashHash.put(passwordHashHash);
 
     return this.#newSessionToken();
@@ -473,7 +565,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
    * returns null instead of creating one — existing users can still sign in.
    */
-  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+  async loginOrCreateViaGatekeeper(
+    email: string,
+    allowCreate: boolean,
+  ): Promise<string | null> {
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
       this.storage.created.put(true);
@@ -491,18 +586,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return this.storage.passwordHashHash.get() !== null;
   }
 
-  async changePassword(oldHash: Uint8Array, newHash: Uint8Array): Promise<void> {
+  async changePassword(
+    oldHash: Uint8Array,
+    newHash: Uint8Array,
+  ): Promise<void> {
     let actualHashHash = this.storage.passwordHashHash.get();
     if (!actualHashHash) {
       throw new Error("This account does not use password login.");
     }
 
-    let oldHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', oldHash));
+    let oldHashHash = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", oldHash),
+    );
     if (!bytesEqual(oldHashHash, actualHashHash)) {
       throw new Error("Incorrect password.");
     }
 
-    let newHashHash = new Uint8Array(await crypto.subtle.digest('SHA-256', newHash));
+    let newHashHash = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", newHash),
+    );
     this.storage.passwordHashHash.put(newHashHash);
   }
 
@@ -527,7 +629,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * Overseer when attempted.
    */
   async recordSharedGadgetOpen(
-      gadgetId: string, title: string, ownerProfile: AiChatAuthorInfo, role?: CollaboratorRole
+    gadgetId: string,
+    title: string,
+    ownerProfile: AiChatAuthorInfo,
+    role?: CollaboratorRole,
   ): Promise<void> {
     let record = this.storage.gadgets.get(gadgetId);
     if (record && !record.owner) {
@@ -559,7 +664,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * comes from the Overseer's live sharing graph; this only keeps the listing's available actions
    * accurate after a collaborator is downgraded.
    */
-  async updateSharedGadgetRole(gadgetId: string, role: CollaboratorRole): Promise<void> {
+  async updateSharedGadgetRole(
+    gadgetId: string,
+    role: CollaboratorRole,
+  ): Promise<void> {
     let record = this.storage.gadgets.get(gadgetId);
     if (!record?.owner) return;
     record.role = role;
@@ -588,76 +696,72 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async listModels(): Promise<AiChatAuthorInfo[]> {
-    let result: AiChatAuthorInfo[] = [];
-
-    // When AI Gateway mode is active, include all suggested models for enabled providers.
-    let gwConfig = getAiGatewayConfig(this.env);
-    let gwModelIds = new Set<string>();
-    if (gwConfig) {
-      for (let entry of gwConfig.getModelList()) {
-        result.push(entry);
-        gwModelIds.add(entry.id);
-      }
-    }
-
-    // Also include user-configured models, skipping any that duplicate a gateway model.
-    for (let model of this.storage.aiModels.list()) {
-      if (!gwModelIds.has(model.profile.id)) {
-        result.push(model.profile);
-      }
+    const gwConfig = getAiGatewayConfig(this.env);
+    if (gwConfig?.models) return gwConfig.getModelList();
+    const result = gwConfig?.getModelList() ?? [];
+    const gatewayIds = new Set(result.map((model) => model.id));
+    for (const model of this.storage.aiModels.list()) {
+      if (!gatewayIds.has(model.profile.id)) result.push(model.profile);
     }
     return result;
   }
 
-  async addModel(profile: AiChatAuthorInfo, config: AiModelConfig): Promise<void> {
-    let gwConfig = getAiGatewayConfig(this.env);
-    if (gwConfig && !gwConfig.providers.has(config.provider)) {
-      throw new Error(`Provider "${config.provider}" is not available in AI Gateway mode.`);
+  async addModel(
+    profile: AiChatAuthorInfo,
+    config: AiModelConfig,
+  ): Promise<void> {
+    if (getAiGatewayConfig(this.env)?.models) {
+      throw new Error(
+        "Custom models are disabled by this Peer Point deployment.",
+      );
     }
 
     profile.type = "agent";
-    this.storage.aiModels.put({profile, config});
+    this.storage.aiModels.put({ profile, config });
   }
 
   async deleteModel(id: string): Promise<void> {
-    // In AI Gateway mode, don't allow deleting built-in suggested models.
-    let gwConfig = getAiGatewayConfig(this.env);
-    if (gwConfig) {
-      for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
-        if (gwConfig.providers.has(provider) && id in models) {
-          throw new Error(`Cannot delete built-in model "${models[id].name}".`);
-        }
-      }
+    const gwConfig = getAiGatewayConfig(this.env);
+    if (gwConfig?.resolveModel(id)) {
+      throw new Error(`Cannot delete deployment model "${id}".`);
     }
-
     this.storage.aiModels.delete(id);
   }
 
   async setQuickModel(id: string | null): Promise<void> {
+    const gwConfig = getAiGatewayConfig(this.env);
+    if (gwConfig?.models) {
+      if (id !== gwConfig.quickModel) {
+        throw new Error(
+          "The quick model is managed by this Peer Point deployment.",
+        );
+      }
+      return;
+    }
     this.storage.quickModel.put(id);
   }
 
   async getQuickModel(): Promise<null | string> {
-    let result = this.storage.quickModel.get();
-    if (result && this.storage.aiModels.get(result)) {
-      return result;
-    } else {
-      return null;
-    }
+    const gwConfig = getAiGatewayConfig(this.env);
+    if (gwConfig?.models) return gwConfig.quickModel ?? null;
+    const result = this.storage.quickModel.get();
+    return result && this.storage.aiModels.get(result) ? result : null;
   }
 
   async getPreferredModel(): Promise<string | null> {
-    return this.storage.preferredModel.get();
+    const id = this.storage.preferredModel.get();
+    const gwConfig = getAiGatewayConfig(this.env);
+    if (id && gwConfig?.models && !gwConfig.resolveModel(id)) return null;
+    return id;
   }
 
   async setPreferredModel(id: string | null): Promise<void> {
     if (id !== null) {
-      // Validate that the model exists in the user's configured models or as a gateway model.
-      let gwConfig = getAiGatewayConfig(this.env);
-      let exists = !!this.storage.aiModels.get(id) || !!gwConfig?.resolveModel(id);
-      if (!exists) {
-        throw new Error(`No such model: ${id}`);
-      }
+      const gwConfig = getAiGatewayConfig(this.env);
+      const exists = gwConfig?.models
+        ? !!gwConfig.resolveModel(id)
+        : !!this.storage.aiModels.get(id) || !!gwConfig?.resolveModel(id);
+      if (!exists) throw new Error(`No such model: ${id}`);
     }
     this.storage.preferredModel.put(id);
   }
@@ -683,7 +787,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let nextAccountId = this.storage.nextAccountId.get();
     for (let id = 0; id < nextAccountId; id++) {
       let rec: ConnectedAccountRecord | undefined;
-      try { rec = this.storage.connectedAccounts.get(id); } catch { continue; }
+      try {
+        rec = this.storage.connectedAccounts.get(id);
+      } catch {
+        continue;
+      }
       if (rec && rec.vendorId === CLOUDFLARE_VENDOR_ID) {
         return rec.account as unknown as Fetcher<CloudflareGatekeeperUser>;
       }
@@ -697,7 +805,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** Update the cached credit balance for the billed account. */
-  async updateCloudflareCredits(creditsRemaining: number | null): Promise<void> {
+  async updateCloudflareCredits(
+    creditsRemaining: number | null,
+  ): Promise<void> {
     let record = this.storage.cloudflareBilling.get() ?? {};
     record.creditsRemaining = creditsRemaining;
     record.creditsUpdatedAt = Date.now();
@@ -708,7 +818,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * Persist which Cloudflare account to bill. Clears the cached credit balance (it belonged to the
    * old account).
    */
-  async setCloudflareAccountSelection(accountId: string, accountName?: string): Promise<void> {
+  async setCloudflareAccountSelection(
+    accountId: string,
+    accountName?: string,
+  ): Promise<void> {
     let record = this.storage.cloudflareBilling.get() ?? {};
     record.accountId = accountId;
     record.accountName = accountName;
@@ -732,8 +845,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async checkDailyLlmCount(limit: number): Promise<DailyQuotaResult> {
     let day = utcDayKey();
     let used = this.#dailyUsed(day);
-    return { withinLimits: used < limit, remaining: Math.max(0, limit - used), limit, used,
-             resetAt: nextUtcMidnightIso() };
+    return {
+      withinLimits: used < limit,
+      remaining: Math.max(0, limit - used),
+      limit,
+      used,
+      resetAt: nextUtcMidnightIso(),
+    };
   }
 
   /**
@@ -745,12 +863,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let day = utcDayKey();
     let used = this.#dailyUsed(day);
     if (used >= limit) {
-      return { withinLimits: false, remaining: 0, limit, used, resetAt: nextUtcMidnightIso() };
+      return {
+        withinLimits: false,
+        remaining: 0,
+        limit,
+        used,
+        resetAt: nextUtcMidnightIso(),
+      };
     }
     let newUsed = used + 1;
     this.storage.dailyLlmCount.put({ day, count: newUsed });
-    return { withinLimits: true, remaining: Math.max(0, limit - newUsed), limit, used: newUsed,
-             resetAt: nextUtcMidnightIso() };
+    return {
+      withinLimits: true,
+      remaining: Math.max(0, limit - newUsed),
+      limit,
+      used: newUsed,
+      resetAt: nextUtcMidnightIso(),
+    };
   }
 
   /** DO NOT MAKE PUBLIC -- returns API keys. Pure read: call sites replay it across DO resets
@@ -759,14 +888,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let gwConfig = getAiGatewayConfig(this.env);
 
     let result: UserChatContext = {
-      profile: this.storage.profile.get()
+      profile: this.storage.profile.get(),
+      trustedAccessEmail: this.storage.trustedAccessEmail.get() ?? undefined,
     };
     if (modelId) {
-      // In AI Gateway mode, resolve gateway models first.
-      if (gwConfig) {
-        result.aiModel = gwConfig.resolveModel(modelId);
-      }
-      if (!result.aiModel) {
+      result.aiModel = gwConfig?.resolveModel(modelId);
+      if (!result.aiModel && !gwConfig?.models) {
         result.aiModel = this.storage.aiModels.get(modelId);
       }
       if (!result.aiModel) throw new Error(`No such model: ${modelId}`);
@@ -774,7 +901,6 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // Resolve the quick model (used for lightweight tasks like title generation).
     if (gwConfig) {
-      // In AI Gateway mode, always use the hardcoded quick model.
       result.quickModel = gwConfig.getQuickModelConfig();
     } else {
       let quickModelId = this.storage.quickModel.get();
@@ -788,12 +914,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
-  async getExternalMessageChatContext(existingChatModelId: string | null): Promise<UserChatContext> {
+  async getExternalMessageChatContext(
+    existingChatModelId: string | null,
+  ): Promise<UserChatContext> {
     let models = await this.listModels();
     // Prefer the existing chat's model, then the user's preferred model, then the first available model.
-    let selectedModel = models.find(model => model.id === existingChatModelId)
-      ?? models.find(model => model.id === this.storage.preferredModel.get())
-      ?? models[0];
+    let selectedModel =
+      models.find((model) => model.id === existingChatModelId) ??
+      models.find((model) => model.id === this.storage.preferredModel.get()) ??
+      models[0];
 
     return this.getChatContext(selectedModel?.id ?? null);
   }
@@ -832,7 +961,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async newGadget(id: string, title: string): Promise<void> {
     let created = new Date();
-    this.storage.gadgets.put({id, title, created});
+    this.storage.gadgets.put({ id, title, created });
   }
 
   async ensureGadgetRegistered(id: string, title: string): Promise<void> {
@@ -840,7 +969,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     await this.newGadget(id, title);
   }
 
-  async setGadgetLastActive(id: string, time: Date, totalCost: number | undefined): Promise<void> {
+  async setGadgetLastActive(
+    id: string,
+    time: Date,
+    totalCost: number | undefined,
+  ): Promise<void> {
     let gadget = this.storage.gadgets.get(id);
     if (gadget) {
       gadget.lastActive = time;
@@ -863,17 +996,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * A workspace the user no longer tracks (deleted, or a shared one they dismissed) has its
    * entries dropped.
    */
-  syncWorkspaceOutputs(workspaceId: string, entries: WorkspaceOutputEntry[]): void {
+  syncWorkspaceOutputs(
+    workspaceId: string,
+    entries: WorkspaceOutputEntry[],
+  ): void {
     this.storage.outputs.byWorkspace.delete(workspaceId);
     if (!this.storage.gadgets.get(workspaceId)) return;
     for (let entry of entries) {
-      this.storage.outputs.put({...entry, workspaceId});
+      this.storage.outputs.put({ ...entry, workspaceId });
     }
   }
 
   async listOutputs(): Promise<ListOutputsResult> {
     let catchingUp = await this.#backfillOutputs();
-    return {outputs: this.#readOutputs(), catchingUp};
+    return { outputs: this.#readOutputs(), catchingUp };
   }
 
   // Ask the user's pre-existing workspaces to populate the outputs index, once. Workspaces push as
@@ -889,7 +1025,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let cursor = startAfter ?? "";
     let targets: string[] = [];
     let examined = 0;
-    for (let gadget of this.storage.gadgets.list({startAfter, limit: OUTPUTS_BACKFILL_PAGE})) {
+    for (let gadget of this.storage.gadgets.list({
+      startAfter,
+      limit: OUTPUTS_BACKFILL_PAGE,
+    })) {
       ++examined;
       cursor = gadget.id;
       // A shared workspace is mirrored on open, not swept; a half-created one has nothing yet.
@@ -899,14 +1038,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     let ownerId = this.ctx.id.toString();
     let overseers = this.ctx.exports.OverseerDurableObject;
-    let results = await Promise.allSettled(targets.map(id =>
-        overseers.get(overseers.idFromString(id)).getOutputsForOwnerBackfill(ownerId)));
+    let results = await Promise.allSettled(
+      targets.map((id) =>
+        overseers
+          .get(overseers.idFromString(id))
+          .getOutputsForOwnerBackfill(ownerId),
+      ),
+    );
 
     let failureCount = 0;
     let firstError: unknown;
     for (let [index, result] of results.entries()) {
       if (result.status === "fulfilled") {
-        if (result.value) this.syncWorkspaceOutputs(targets[index], result.value);
+        if (result.value)
+          this.syncWorkspaceOutputs(targets[index], result.value);
       } else {
         if (failureCount === 0) firstError = result.reason;
         ++failureCount;
@@ -944,13 +1089,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       result.push({
         workspaceId: output.workspaceId,
         workpieceId: output.workpieceId,
-        ...(output.output ? {output: output.output} : {}),
+        ...(output.output ? { output: output.output } : {}),
         title: output.title,
         workspaceTitle: workspace.title,
         created: output.created,
         lastActive: workspace.lastActive,
-        ...(workspace.owner ? {owner: workspace.owner} : {}),
-        ...(workspace.role ? {role: workspace.role} : {}),
+        ...(workspace.owner ? { owner: workspace.owner } : {}),
+        ...(workspace.role ? { role: workspace.role } : {}),
       });
     }
     result.sort((a, b) => b.lastActive.getTime() - a.lastActive.getTime());
@@ -959,15 +1104,22 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   // --- Blueprint methods (called by Overseer during propagation) ---
 
-  async updateBlueprint(id: string, metadata: BlueprintMetadata, gadgetId: string): Promise<boolean> {
+  async updateBlueprint(
+    id: string,
+    metadata: BlueprintMetadata,
+    gadgetId: string,
+  ): Promise<boolean> {
     let existing = this.storage.blueprints.get(id);
     // Preserve the featured bit across metadata-only/code updates.
     let featured = existing?.featured === true;
-    this.storage.blueprints.put({id, metadata, gadgetId, featured});
+    this.storage.blueprints.put({ id, metadata, gadgetId, featured });
     return featured;
   }
 
-  async importBlueprint(id: string, metadata: BlueprintMetadata): Promise<void> {
+  async importBlueprint(
+    id: string,
+    metadata: BlueprintMetadata,
+  ): Promise<void> {
     this.storage.libraryBlueprints.put({
       id,
       metadata,
@@ -979,7 +1131,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async deleteBlueprint(id: string): Promise<void> {
     this.storage.blueprints.delete(id);
     this.storage.pinnedBlueprints.put(
-      this.storage.pinnedBlueprints.get().filter(existing => existing !== id));
+      this.storage.pinnedBlueprints.get().filter((existing) => existing !== id),
+    );
   }
 
   isBlueprintPinned(id: string): boolean {
@@ -987,10 +1140,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async setBlueprintPinned(id: string, pinned: boolean): Promise<void> {
-    let pinnedBlueprints = this.storage.pinnedBlueprints.get().filter(existing => existing !== id);
+    let pinnedBlueprints = this.storage.pinnedBlueprints
+      .get()
+      .filter((existing) => existing !== id);
 
     if (pinned) {
-      if (!this.storage.blueprints.get(id) && !this.storage.libraryBlueprints.get(id)) {
+      if (
+        !this.storage.blueprints.get(id) &&
+        !this.storage.libraryBlueprints.get(id)
+      ) {
         await this.addBlueprintToLibrary(id);
       }
       pinnedBlueprints.unshift(id);
@@ -1034,7 +1192,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  async isBlueprintInLibrary(id: string): Promise<{ uploaded: boolean } | null> {
+  async isBlueprintInLibrary(
+    id: string,
+  ): Promise<{ uploaded: boolean } | null> {
     const record = this.storage.libraryBlueprints.get(id);
     if (!record) return null;
     return { uploaded: record.uploaded };
@@ -1063,7 +1223,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       for (let v = 1; v <= kvRecord.metadata.version; v++) {
         await this.env.BLUEPRINT_CONTENT.delete(`${id}/${v}`);
       }
-      await this.env.BLUEPRINT_CONTENT.delete(`${BLUEPRINT_SCREENSHOT_R2_PREFIX}${id}`);
+      await this.env.BLUEPRINT_CONTENT.delete(
+        `${BLUEPRINT_SCREENSHOT_R2_PREFIX}${id}`,
+      );
 
       // Delete from KV.
       await this.env.BLUEPRINTS.delete(id);
@@ -1103,7 +1265,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   getBlueprint(id: string): BlueprintUserSummary | null {
     let record = this.storage.blueprints.get(id);
-    return record ? this.blueprintSummary(record, new Set(this.storage.pinnedBlueprints.get())) : null;
+    return record
+      ? this.blueprintSummary(
+          record,
+          new Set(this.storage.pinnedBlueprints.get()),
+        )
+      : null;
   }
 
   async listBlueprints(): Promise<BlueprintUserSummary[]> {
@@ -1116,7 +1283,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
-  private blueprintSummary(record: BlueprintUserRecord, pinnedBlueprintIds: Set<string>): BlueprintUserSummary {
+  private blueprintSummary(
+    record: BlueprintUserRecord,
+    pinnedBlueprintIds: Set<string>,
+  ): BlueprintUserSummary {
     return {
       id: record.id,
       title: record.metadata.title,
@@ -1135,7 +1305,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (!record.gadgetId) return { type: "imported" };
     let workspace = this.storage.gadgets.get(record.gadgetId);
     if (!workspace) return { type: "deletedWorkspace" };
-    return { type: "workspace", workspaceId: record.gadgetId, workspaceTitle: workspace.title };
+    return {
+      type: "workspace",
+      workspaceId: record.gadgetId,
+      workspaceTitle: workspace.title,
+    };
   }
 
   async listLibraryBlueprints(): Promise<BlueprintLibrarySummary[]> {
@@ -1154,10 +1328,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return result;
   }
 
-  async listGatekeeperVendors(filter: GatekeeperVendorFilter = {})
-      : Promise<GatekeeperVendorInfo[]> {
+  async listGatekeeperVendors(
+    filter: GatekeeperVendorFilter = {},
+  ): Promise<GatekeeperVendorInfo[]> {
     let options = {
-      userId: this.storage.profile.get().id
+      userId: this.storage.profile.get().id,
     };
 
     // Admin-disabled resources/gatekeepers are filtered out here, which also covers the agent (the
@@ -1169,45 +1344,64 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     for (let [id, vendor] of this.vendors) {
       if (disabledGatekeeperSet.has(id)) {
-        continue;  // Whole gatekeeper disabled by admin.
+        continue; // Whole gatekeeper disabled by admin.
       }
-      promises.push((async () => {
-        if (filter && !(await checkGatekeeperVendorFilter(vendor, id, filter))) {
-          return null;
-        }
-
-        try {
-          let [description, supportedResources] = await Promise.all([
-            vendor.describe(),
-            vendor.getSupportedResources(options),
-          ]);
-          let enabledResources =
-              filterEnabledResources(config, id, supportedResources);
-          if (enabledResources.length == 0) {
-            // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
+      promises.push(
+        (async () => {
+          if (
+            filter &&
+            !(await checkGatekeeperVendorFilter(vendor, id, filter))
+          ) {
             return null;
           }
 
-          return {id, description, supportedResources: enabledResources};
-        } catch (err) {
-          logger.warn("failed to load gatekeeper vendor", {
-            event: "gatekeeper.vendor.load.failed", vendorId: id, error: err,
-          });
-          return unavailableGatekeeperVendorInfo(id);
-        }
-      })());
+          try {
+            let [description, supportedResources] = await Promise.all([
+              vendor.describe(),
+              vendor.getSupportedResources(options),
+            ]);
+            let enabledResources = filterEnabledResources(
+              config,
+              id,
+              supportedResources,
+            );
+            if (enabledResources.length == 0) {
+              // Every resource for this vendor is disabled (or it advertised none) — hide the vendor.
+              return null;
+            }
+
+            return { id, description, supportedResources: enabledResources };
+          } catch (err) {
+            logger.warn("failed to load gatekeeper vendor", {
+              event: "gatekeeper.vendor.load.failed",
+              vendorId: id,
+              error: err,
+            });
+            return unavailableGatekeeperVendorInfo(id);
+          }
+        })(),
+      );
     }
 
-    return (await Promise.all(promises)).filter(value => value !== null);
+    return (await Promise.all(promises)).filter((value) => value !== null);
   }
 
-  async connectAccount(vendorId: string, resourceUrlPatterns?: string[]): Promise<ConnectFlowStart> {
+  async connectAccount(
+    vendorId: string,
+    resourceUrlPatterns?: string[],
+  ): Promise<ConnectFlowStart> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) {
       throw new Error("No such service: " + vendorId);
     }
-    if ((await readAdminConfig(this.env)).disabledGatekeepers.includes(vendorId.toLowerCase())) {
-      throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment.`);
+    if (
+      (await readAdminConfig(this.env)).disabledGatekeepers.includes(
+        vendorId.toLowerCase(),
+      )
+    ) {
+      throw new Error(
+        `The "${vendorId}" gatekeeper is disabled on this deployment.`,
+      );
     }
 
     let accountId = this.storage.nextAccountId.get();
@@ -1219,12 +1413,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       vendorId,
     };
 
-    let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({props});
+    let callback = this.ctx.exports.GatekeeperConnectCallbackImpl({ props });
 
-    let {url} = await vendor.connectAccount(callback, {resourceUrlPatterns});
+    let { url } = await vendor.connectAccount(callback, {
+      resourceUrlPatterns,
+    });
     let nonce = await this.openConnectFlow(accountId);
     logger.info("account connect started", {
-      event: "account.connect.started", vendorId, accountId,
+      event: "account.connect.started",
+      vendorId,
+      accountId,
     });
     return { url, nonce };
   }
@@ -1242,7 +1440,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         rec = this.storage.connectedAccounts.get(id);
       } catch (err) {
         logger.warn("skipping connected account: failed to load", {
-          event: "connected.account.load.skipped", accountId: id, error: err,
+          event: "connected.account.load.skipped",
+          accountId: id,
+          error: err,
         });
         continue;
       }
@@ -1261,20 +1461,31 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // Resolve every bound vendor that auto-provisions an account (VendorDescription.autoProvisionsAccount),
   // describing them in parallel and dropping any whose describe() fails. Shared discovery step for both
   // listing and auto-provisioning ambient gatekeepers; callers apply their own admin-mode filter.
-  async #ambientVendors():
-      Promise<Array<{vendorId: string, vendor: Service<GatekeeperVendor>, description: VendorDescription}>> {
-    let described = await Promise.all([...this.vendors].map(async ([vendorId, vendor]) => {
-      try {
-        let description = await vendor.describe();
-        return description.autoProvisionsAccount ? {vendorId, vendor, description} : null;
-      } catch (err) {
-        logger.warn("failed to describe vendor", {
-          event: "vendor.describe.failed", vendorId, error: err,
-        });
-        return null;
-      }
-    }));
-    return described.filter(v => v !== null);
+  async #ambientVendors(): Promise<
+    Array<{
+      vendorId: string;
+      vendor: Service<GatekeeperVendor>;
+      description: VendorDescription;
+    }>
+  > {
+    let described = await Promise.all(
+      [...this.vendors].map(async ([vendorId, vendor]) => {
+        try {
+          let description = await vendor.describe();
+          return description.autoProvisionsAccount
+            ? { vendorId, vendor, description }
+            : null;
+        } catch (err) {
+          logger.warn("failed to describe vendor", {
+            event: "vendor.describe.failed",
+            vendorId,
+            error: err,
+          });
+          return null;
+        }
+      }),
+    );
+    return described.filter((v) => v !== null);
   }
 
   /**
@@ -1284,11 +1495,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async listAddableGatekeepers(): Promise<GatekeeperVendorInfo[]> {
     let config = await readAdminConfig(this.env);
-    return (await this.#ambientVendors())
-        .filter(({vendorId}) =>
-            ambientGatekeeperMode(config, vendorId) === "optional" && !this.#hasAccountForVendor(vendorId))
+    return (
+      (await this.#ambientVendors())
+        .filter(
+          ({ vendorId }) =>
+            ambientGatekeeperMode(config, vendorId) === "optional" &&
+            !this.#hasAccountForVendor(vendorId),
+        )
         // Same shape as listGatekeeperVendors; ambient gatekeepers expose no resources.
-        .map(({vendorId, description}) => ({id: vendorId, description, supportedResources: []}));
+        .map(({ vendorId, description }) => ({
+          id: vendorId,
+          description,
+          supportedResources: [],
+        }))
+    );
   }
 
   // Per-vendor dedup of concurrent provisionAmbientAccount() calls — same DO-input-gate race as
@@ -1303,8 +1523,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     vendorId = vendorId.toLowerCase();
     let inFlight = this.#provisionPromises.get(vendorId);
     if (inFlight) return inFlight;
-    let promise = this.#provisionAmbientAccount(vendorId)
-        .finally(() => { this.#provisionPromises.delete(vendorId); });
+    let promise = this.#provisionAmbientAccount(vendorId).finally(() => {
+      this.#provisionPromises.delete(vendorId);
+    });
     this.#provisionPromises.set(vendorId, promise);
     return promise;
   }
@@ -1313,8 +1534,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let vendor = this.vendors.get(vendorId);
     if (!vendor) throw new Error("No such service: " + vendorId);
 
-    if (ambientGatekeeperMode(await readAdminConfig(this.env), vendorId) === "disabled") {
-      throw new Error(`The "${vendorId}" gatekeeper is disabled on this deployment.`);
+    if (
+      ambientGatekeeperMode(await readAdminConfig(this.env), vendorId) ===
+      "disabled"
+    ) {
+      throw new Error(
+        `The "${vendorId}" gatekeeper is disabled on this deployment.`,
+      );
     }
 
     let description = await vendor.describe();
@@ -1322,7 +1548,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new Error(`The "${vendorId}" gatekeeper can't be added this way.`);
     }
 
-    if (this.#hasAccountForVendor(vendorId)) return;  // already added
+    if (this.#hasAccountForVendor(vendorId)) return; // already added
 
     await this.#createAutoProvisionedAccount(vendorId, vendor);
   }
@@ -1330,8 +1556,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // Mint a vendor's connected account with no OAuth flow and persist it as auto-provisioned. The
   // caller must have already confirmed the vendor sets autoProvisionsAccount (so createAccount is
   // present) and that the user has no account for it yet.
-  async #createAutoProvisionedAccount(vendorId: string, vendor: Service<GatekeeperVendor>): Promise<void> {
-    let account = await (vendor as unknown as AccountCreatorStub).createAccount();
+  async #createAutoProvisionedAccount(
+    vendorId: string,
+    vendor: Service<GatekeeperVendor>,
+  ): Promise<void> {
+    let account = await (
+      vendor as unknown as AccountCreatorStub
+    ).createAccount();
     // Resolve the description before allocating the id, so a describe() failure doesn't burn a slot.
     let description = await account.describe();
     let accountId = this.storage.nextAccountId.get();
@@ -1358,7 +1589,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // vendor. Deduped via #ensureAccountsPromise (above); callers reach it through listProvidedAccounts.
   #ensureAutoProvisionedAccounts(): Promise<void> {
     return (this.#ensureAccountsPromise ??=
-      this.#provisionMissingAccounts().finally(() => { this.#ensureAccountsPromise = undefined; }));
+      this.#provisionMissingAccounts().finally(() => {
+        this.#ensureAccountsPromise = undefined;
+      }));
   }
 
   async #provisionMissingAccounts(): Promise<void> {
@@ -1369,7 +1602,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     }
 
     let config = await readAdminConfig(this.env);
-    for (let {vendorId, vendor} of await this.#ambientVendors()) {
+    for (let { vendorId, vendor } of await this.#ambientVendors()) {
       if (provisioned.has(vendorId)) continue;
       // Only "enabled" (forced) vendors are auto-provisioned for everyone. "optional" vendors are
       // added on demand by the user (provisionAmbientAccount); "disabled" ones never.
@@ -1379,7 +1612,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         await this.#createAutoProvisionedAccount(vendorId, vendor);
       } catch (err) {
         logger.error("failed to auto-provision account", {
-          event: "account.auto.provision.failed", vendorId, error: err,
+          event: "account.auto.provision.failed",
+          vendorId,
+          error: err,
         });
       }
     }
@@ -1400,8 +1635,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (!rec.description.singleton && !rec.description.providesUi) continue;
       // A "disabled" ambient gatekeeper's account stays dormant: don't surface its singleton capsule
       // or management UI. (Its data is preserved, so re-enabling restores it.)
-      if (rec.autoProvisioned && ambientGatekeeperMode(config, rec.vendorId) === "disabled") continue;
-      result.push({ accountId: rec.id, vendorId: rec.vendorId, description: rec.description });
+      if (
+        rec.autoProvisioned &&
+        ambientGatekeeperMode(config, rec.vendorId) === "disabled"
+      )
+        continue;
+      result.push({
+        accountId: rec.id,
+        vendorId: rec.vendorId,
+        description: rec.description,
+      });
     }
     return result;
   }
@@ -1412,27 +1655,37 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * and catalog run gadget-side in the gatekeeper's own worker — no further round-trips through this
    * DO. The account capability stays encapsulated here; only the class reference crosses out.
    */
-  async getSingletonGatekeeperClass(accountId: number)
-      : Promise<DurableObjectClass<Gatekeeper<any>> | null> {
+  async getSingletonGatekeeperClass(
+    accountId: number,
+  ): Promise<DurableObjectClass<Gatekeeper<any>> | null> {
     let record = this.storage.connectedAccounts.get(accountId);
     // Present only when description.singleton is set; gate on that, then call through the derived
     // SingletonAccountStub view (see its definition for why the cast is needed).
     if (!record?.description.singleton) return null;
-    return (record.account as unknown as SingletonAccountStub).getSingletonGatekeeperClass();
+    return (
+      record.account as unknown as SingletonAccountStub
+    ).getSingletonGatekeeperClass();
   }
 
   /**
    * Open the full-page management UI for an account that declares one. `context.isAdmin` is supplied
    * fresh by the caller so admin-gated features reflect the user's current status.
    */
-  async startAccountAppUi(accountId: number, context: AppUiContext): Promise<GatekeeperUiFrame> {
+  async startAccountAppUi(
+    accountId: number,
+    context: AppUiContext,
+  ): Promise<GatekeeperUiFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record?.description.providesUi) throw new Error("No such app.");
-    return (record.account as unknown as SingletonAccountStub).startAppUi(context);
+    return (record.account as unknown as SingletonAccountStub).startAppUi(
+      context,
+    );
   }
 
-  async ensureAccountResources(accountId: number, resourceUrlPatterns: string[])
-      : Promise<ConnectFlowStart | null> {
+  async ensureAccountResources(
+    accountId: number,
+    resourceUrlPatterns: string[],
+  ): Promise<ConnectFlowStart | null> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
     let { url } = await record.account.ensureResources(resourceUrlPatterns);
@@ -1441,14 +1694,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async subscribeConnectedAccounts(
-      subscriber: RpcStub<ConnectedAccountsSubscriber>, filter?: ConnectedAccountsFilter)
-      : Promise<RpcStub<{}>> {
-    if (filter?.includeForcedAutoProvisionedAccounts) await this.#ensureAutoProvisionedAccounts();
+    subscriber: RpcStub<ConnectedAccountsSubscriber>,
+    filter?: ConnectedAccountsFilter,
+  ): Promise<RpcStub<{}>> {
+    if (filter?.includeForcedAutoProvisionedAccounts)
+      await this.#ensureAutoProvisionedAccounts();
 
     let connectedAccounts = this.storage.connectedAccounts;
     let vendors = this.vendors;
 
-    subscriber = subscriber.dup();  // keep stub after return
+    subscriber = subscriber.dup(); // keep stub after return
 
     let seenIds = new Set<number>();
     let vendorDescriptions = new Map<string, Promise<VendorDescription>>();
@@ -1465,16 +1720,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       // Forced accounts are included when observer verification explicitly requests them.
       if (record.autoProvisioned) {
         let mode = ambientGatekeeperMode(config, record.vendorId);
-        if (mode === "disabled" ||
-            (mode === "enabled" && !filter?.includeForcedAutoProvisionedAccounts)) {
+        if (
+          mode === "disabled" ||
+          (mode === "enabled" && !filter?.includeForcedAutoProvisionedAccounts)
+        ) {
           return;
         }
       }
       if (disabledGatekeeperSet.has(record.vendorId)) {
-        return;  // Whole gatekeeper disabled by admin.
+        return; // Whole gatekeeper disabled by admin.
       }
-      if (filter && !(await checkGatekeeperVendorFilter(
-          record.account, record.vendorId, filter))) {
+      if (
+        filter &&
+        !(await checkGatekeeperVendorFilter(
+          record.account,
+          record.vendorId,
+          filter,
+        ))
+      ) {
         return;
       }
 
@@ -1482,7 +1745,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (!vendor) {
         logger.error("no such service for connected account", {
           event: "connected.account.service.missing",
-          accountId: record.id, vendorId: record.vendorId,
+          accountId: record.id,
+          vendorId: record.vendorId,
         });
         return;
       }
@@ -1491,7 +1755,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         let vendorDescriptionPromise = vendorDescriptions.get(record.vendorId);
         if (!vendorDescriptionPromise) {
-          vendorDescriptionPromise = vendor.describe().catch(err => {
+          vendorDescriptionPromise = vendor.describe().catch((err) => {
             vendorDescriptions.delete(record.vendorId);
             throw err;
           });
@@ -1501,7 +1765,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       } catch (err) {
         logger.warn("failed to describe connected account", {
           event: "connected.account.describe.failed",
-          accountId: record.id, vendorId: record.vendorId, error: err,
+          accountId: record.id,
+          vendorId: record.vendorId,
+          error: err,
         });
         return;
       }
@@ -1509,27 +1775,43 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       let supportedResources: SupportedResource[] = [];
       try {
         supportedResources = await record.account.getSupportedResources();
-        supportedResources =
-            filterEnabledResources(config, record.vendorId, supportedResources);
+        supportedResources = filterEnabledResources(
+          config,
+          record.vendorId,
+          supportedResources,
+        );
       } catch (err) {
         logger.warn("failed to get supported resources for connected account", {
           event: "connected.account.supported.resources.failed",
-          accountId: record.id, vendorId: record.vendorId, error: err,
+          accountId: record.id,
+          vendorId: record.vendorId,
+          error: err,
         });
       }
 
       let credentialsValid = areCredentialsValid(record);
 
       seenIds.add(record.id);
-      subscriber.add(record.id, record.description, vendorDescription,
-          supportedResources, credentialsValid, record.vendorId).catch(unsubscribe)
+      subscriber
+        .add(
+          record.id,
+          record.description,
+          vendorDescription,
+          supportedResources,
+          credentialsValid,
+          record.vendorId,
+        )
+        .catch(unsubscribe);
     }
 
     let dbSubscriber = {
       async add(record: ConnectedAccountRecord) {
         await notifyAdd(record);
       },
-      async update(oldRecord: ConnectedAccountRecord, newRecord: ConnectedAccountRecord) {
+      async update(
+        oldRecord: ConnectedAccountRecord,
+        newRecord: ConnectedAccountRecord,
+      ) {
         await notifyAdd(newRecord);
       },
       remove(record: ConnectedAccountRecord): void {
@@ -1537,8 +1819,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
           subscriber.remove(record.id);
           seenIds.delete(record.id);
         }
-      }
-    }
+      },
+    };
 
     let unsubscribe = () => {
       connectedAccounts.unsubscribe(dbSubscriber);
@@ -1547,7 +1829,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
     // #connectedAccountRecords() skips any record that fails to load, so a single stale account
     // (e.g. one whose gatekeeper Worker is no longer bound) doesn't prevent surfacing the others.
-    let promises = [...this.#connectedAccountRecords()].map(record => notifyAdd(record));
+    let promises = [...this.#connectedAccountRecords()].map((record) =>
+      notifyAdd(record),
+    );
 
     connectedAccounts.subscribe(dbSubscriber);
 
@@ -1559,7 +1843,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       [Symbol.dispose]() {
         unsubscribe();
         subscriber[Symbol.dispose]();
-      }
+      },
     });
   }
 
@@ -1568,8 +1852,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     if (account) {
       if (account.autoProvisioned) {
         // A forced ("enabled") ambient account can't be removed by the user — the admin controls it.
-        if (shouldAutoProvisionAccount(await readAdminConfig(this.env), account.vendorId)) {
-          throw new Error("This account is provided automatically and can't be disconnected.");
+        if (
+          shouldAutoProvisionAccount(
+            await readAdminConfig(this.env),
+            account.vendorId,
+          )
+        ) {
+          throw new Error(
+            "This account is provided automatically and can't be disconnected.",
+          );
         }
         // An opt-in ("optional") ambient account: the user added it, so let them remove it. revoke()
         // gives the gatekeeper a chance to delete its own per-user storage (e.g. the account's
@@ -1580,13 +1871,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         } catch (err) {
           logger.error("revoke() failed during disconnect", {
             event: "account.revoke.failed",
-            vendorId: account.vendorId, accountId, error: err,
+            vendorId: account.vendorId,
+            accountId,
+            error: err,
           });
         }
         this.storage.connectedAccounts.delete(accountId);
         logger.info("account disconnected", {
           event: "account.disconnected",
-          vendorId: account.vendorId, accountId, autoProvisioned: true,
+          vendorId: account.vendorId,
+          accountId,
+          autoProvisioned: true,
         });
         return;
       }
@@ -1599,7 +1894,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
       logger.info("account disconnected", {
         event: "account.disconnected",
-        vendorId: account.vendorId, accountId, autoProvisioned: false,
+        vendorId: account.vendorId,
+        accountId,
+        autoProvisioned: false,
       });
     }
   }
@@ -1612,8 +1909,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   async startResourceConfigurator(
-      accountId: number,
-      resourceUrlPattern: string): Promise<ResourceConfiguratorFrame> {
+    accountId: number,
+    resourceUrlPattern: string,
+  ): Promise<ResourceConfiguratorFrame> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record) throw new Error("No such account.");
     return record.account.startResourceConfigurator(resourceUrlPattern);
@@ -1629,7 +1927,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * gatekeeper keeps for that account's lifetime — can find it again.
    */
   async linkConnectedAccountFromLogin(
-      account: Fetcher<GatekeeperUser>, vendorId: string, expiresAt?: Date): Promise<number> {
+    account: Fetcher<GatekeeperUser>,
+    vendorId: string,
+    expiresAt?: Date,
+  ): Promise<number> {
     let description = await account.describe();
     let uniqueName = description.uniqueName;
 
@@ -1648,7 +1949,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         } catch (err) {
           logger.error("failed to revoke stale grant; replacing anyway", {
             event: "account.stale.grant.revoke.failed",
-            accountId: existing.id, vendorId, error: err,
+            accountId: existing.id,
+            vendorId,
+            error: err,
           });
         }
         existing.account = account;
@@ -1676,8 +1979,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // `excludeId`. Skips records that fail to load, for the same reasons as subscribeConnectedAccounts():
   // a single corrupt record (e.g. one referencing a Worker binding that no longer exists) must not
   // poison the scan and prevent the user from connecting any new account.
-  #findConnectedAccountByIdentity(vendorId: string, uniqueName: string, excludeId?: number)
-      : ConnectedAccountRecord | undefined {
+  #findConnectedAccountByIdentity(
+    vendorId: string,
+    uniqueName: string,
+    excludeId?: number,
+  ): ConnectedAccountRecord | undefined {
     let nextAccountId = this.storage.nextAccountId.get();
     for (let id = 0; id < nextAccountId; id++) {
       if (id === excludeId) continue;
@@ -1685,13 +1991,21 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         existing = this.storage.connectedAccounts.get(id);
       } catch (err) {
-        logger.warn("skipping connected account during identity lookup: failed to load", {
-          event: "connected.account.identity.lookup.skipped", accountId: id, error: err,
-        });
+        logger.warn(
+          "skipping connected account during identity lookup: failed to load",
+          {
+            event: "connected.account.identity.lookup.skipped",
+            accountId: id,
+            error: err,
+          },
+        );
         continue;
       }
       if (!existing) continue;
-      if (existing.vendorId === vendorId && existing.description.uniqueName === uniqueName) {
+      if (
+        existing.vendorId === vendorId &&
+        existing.description.uniqueName === uniqueName
+      ) {
         return existing;
       }
     }
@@ -1700,8 +2014,14 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async putConnectedAccount(record: ConnectedAccountRecord) {
     let uniqueName = record.description.uniqueName;
-    if (uniqueName &&
-        this.#findConnectedAccountByIdentity(record.vendorId, uniqueName, record.id)) {
+    if (
+      uniqueName &&
+      this.#findConnectedAccountByIdentity(
+        record.vendorId,
+        uniqueName,
+        record.id,
+      )
+    ) {
       // OAuth providers often return the currently logged-in identity when the user tries to add
       // another account. Avoid showing duplicate account rows: keep the existing record stable for
       // any UI references, and revoke the newly-created duplicate grant.
@@ -1738,7 +2058,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       this.storage.connectedAccounts.put(record);
     } catch (err) {
       logger.warn("failed to refresh the description of a restored account", {
-        event: "account.describe.refresh.failed", vendorId: record.vendorId, accountId, error: err,
+        event: "account.describe.refresh.failed",
+        vendorId: record.vendorId,
+        accountId,
+        error: err,
       });
     }
   }
@@ -1763,7 +2086,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // only in this user's DO, so the ticket is redeemable by nobody else (completeConnectHandoff looks
   // it up in the caller's own DO).
   async #stagePendingHandoff(
-      record: Omit<PendingHandoffRecord, "ticketHash" | "expiresAt">): Promise<ConnectHandoff> {
+    record: Omit<PendingHandoffRecord, "ticketHash" | "expiresAt">,
+  ): Promise<ConnectHandoff> {
     let targetOrigin = handoffTargetOrigin(this.env);
     let { secret, hash: ticketHash } = await newSecretToken();
     let expiresAt = new Date(Date.now() + PENDING_HANDOFF_LIFETIME_MS);
@@ -1773,11 +2097,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /** A gatekeeper finished a connect flow for a reserved account id; stage it until confirmed. */
-  async stagePendingConnect(accountId: number, account: Fetcher<GatekeeperUser>, vendorId: string,
-                            credentialExpiresAt?: Date): Promise<ConnectHandoff> {
+  async stagePendingConnect(
+    accountId: number,
+    account: Fetcher<GatekeeperUser>,
+    vendorId: string,
+    credentialExpiresAt?: Date,
+  ): Promise<ConnectHandoff> {
     let description = await account.describe();
     return this.#stagePendingHandoff({
-      kind: "connect", accountId, credentialExpiresAt, connect: { account, description, vendorId },
+      kind: "connect",
+      accountId,
+      credentialExpiresAt,
+      connect: { account, description, vendorId },
     });
   }
 
@@ -1785,9 +2116,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * A gatekeeper finished a reconnect/ensureResources flow; its credentials stay staged there under
    * `stageId`, which commitReconnect() names so the ticket activates exactly those credentials.
    */
-  stagePendingRestore(accountId: number, stageId: string, credentialExpiresAt?: Date)
-      : Promise<ConnectHandoff> {
-    return this.#stagePendingHandoff({ kind: "restore", accountId, stageId, credentialExpiresAt });
+  stagePendingRestore(
+    accountId: number,
+    stageId: string,
+    credentialExpiresAt?: Date,
+  ): Promise<ConnectHandoff> {
+    return this.#stagePendingHandoff({
+      kind: "restore",
+      accountId,
+      stageId,
+      credentialExpiresAt,
+    });
   }
 
   /**
@@ -1800,8 +2139,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * reachable in a gatekeeper with nothing to revoke it.
    */
   async completeConnectHandoff(ticket: string, nonce: string): Promise<void> {
-    let [ticketHash, nonceHash] =
-        await Promise.all([hashPresentedSecret(ticket), hashPresentedSecret(nonce)]);
+    let [ticketHash, nonceHash] = await Promise.all([
+      hashPresentedSecret(ticket),
+      hashPresentedSecret(nonce),
+    ]);
     let record: PendingHandoffRecord | undefined;
     if (ticketHash !== undefined) {
       record = this.storage.pendingHandoffs.get(ticketHash);
@@ -1813,8 +2154,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (flow) this.storage.pendingConnectFlows.delete(nonceHash);
     }
     let now = Date.now();
-    if (!record || record.expiresAt.getTime() <= now ||
-        !flow || flow.expiresAt.getTime() <= now || flow.accountId !== record.accountId) {
+    if (
+      !record ||
+      record.expiresAt.getTime() <= now ||
+      !flow ||
+      flow.expiresAt.getTime() <= now ||
+      flow.accountId !== record.accountId
+    ) {
       if (record) await this.#dropPendingConnect(record);
       throw new Error("This connection attempt has expired. Please try again.");
     }
@@ -1823,25 +2169,33 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (!record.connect) throw new Error("Corrupt pending connection.");
       try {
         await this.putConnectedAccount({
-          id: record.accountId, ...record.connect, credentialExpiresAt: record.credentialExpiresAt,
+          id: record.accountId,
+          ...record.connect,
+          credentialExpiresAt: record.credentialExpiresAt,
         });
       } catch (err) {
         await this.#dropPendingConnect(record);
         throw err;
       }
       logger.info("account connected", {
-        event: "account.connect.completed", vendorId: record.connect.vendorId,
+        event: "account.connect.completed",
+        vendorId: record.connect.vendorId,
         accountId: record.accountId,
       });
     } else {
       let account = this.storage.connectedAccounts.get(record.accountId);
       if (!account) throw new Error("No such account.");
-      if (record.stageId === undefined) throw new Error("Corrupt pending reconnect.");
+      if (record.stageId === undefined)
+        throw new Error("Corrupt pending reconnect.");
       // A failed commit changed nothing live, and the gatekeeper's stage expires on its own.
       await account.account.commitReconnect(record.stageId);
-      await this.markCredentialsRestored(record.accountId, record.credentialExpiresAt);
+      await this.markCredentialsRestored(
+        record.accountId,
+        record.credentialExpiresAt,
+      );
       logger.info("account credentials restored", {
-        event: "account.reconnect.completed", vendorId: account.vendorId,
+        event: "account.reconnect.completed",
+        vendorId: account.vendorId,
         accountId: record.accountId,
       });
     }
@@ -1858,30 +2212,39 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         await pending.connect.account.revoke();
       } catch (err) {
         logger.warn("failed to revoke unconfirmed connection", {
-          event: "connect.handoff.revoke.failed", vendorId: pending.connect.vendorId,
-          accountId: pending.accountId, error: err,
+          event: "connect.handoff.revoke.failed",
+          vendorId: pending.connect.vendorId,
+          accountId: pending.accountId,
+          error: err,
         });
       }
     }
     logger.info("unconfirmed connection dropped", {
-      event: "connect.handoff.expired", handoffKind: pending.kind, accountId: pending.accountId,
+      event: "connect.handoff.expired",
+      handoffKind: pending.kind,
+      accountId: pending.accountId,
     });
   }
 
   // Arm the alarm for the soonest pending expiry (the alarm is used for nothing else).
   async #armHandoffSweep(): Promise<void> {
     let next: number | undefined;
-    let consider = (at: number) => { if (next === undefined || at < next) next = at; };
-    for (let flow of this.storage.pendingConnectFlows.list()) consider(flow.expiresAt.getTime());
+    let consider = (at: number) => {
+      if (next === undefined || at < next) next = at;
+    };
+    for (let flow of this.storage.pendingConnectFlows.list())
+      consider(flow.expiresAt.getTime());
     try {
-      for (let pending of this.storage.pendingHandoffs.list()) consider(pending.expiresAt.getTime());
+      for (let pending of this.storage.pendingHandoffs.list())
+        consider(pending.expiresAt.getTime());
     } catch (err) {
       // A record whose stub no longer deserializes (its Worker was unbound) fails the listing, and
       // without a keys-only listing it cannot be deleted either. Staging a new connect must not
       // depend on listing old ones, so arm a retry instead: one warning per lifetime for this user
       // until the Worker is bound again, while the grant the record holds is reachable by nobody.
       logger.warn("failed to list pending handoffs", {
-        event: "connect.handoff.arm.failed", error: err,
+        event: "connect.handoff.arm.failed",
+        error: err,
       });
       consider(Date.now() + PENDING_HANDOFF_LIFETIME_MS);
     }
@@ -1898,9 +2261,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async alarm(): Promise<void> {
     let now = Date.now();
-    let expiredFlows = Array.from(this.storage.pendingConnectFlows.list())
-        .filter(flow => flow.expiresAt.getTime() <= now);
-    for (let flow of expiredFlows) this.storage.pendingConnectFlows.delete(flow.nonceHash);
+    let expiredFlows = Array.from(
+      this.storage.pendingConnectFlows.list(),
+    ).filter((flow) => flow.expiresAt.getTime() <= now);
+    for (let flow of expiredFlows)
+      this.storage.pendingConnectFlows.delete(flow.nonceHash);
     let expired: PendingHandoffRecord[] = [];
     try {
       for (let pending of this.storage.pendingHandoffs.list()) {
@@ -1910,7 +2275,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       // Same failure mode as #connectedAccountRecords: a stub for a Worker that is no longer bound
       // fails to deserialize. Leave the sweep for next time (#armHandoffSweep bounds the retry).
       logger.warn("failed to list pending handoffs", {
-        event: "connect.handoff.sweep.failed", error: err,
+        event: "connect.handoff.sweep.failed",
+        error: err,
       });
     }
     for (let pending of expired) {
@@ -1920,12 +2286,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     await this.#armHandoffSweep();
   }
 
-  async getGatekeeperClassFor(accountId: number, url: string)
-      : Promise<{class: DurableObjectClass<Gatekeeper<any>>, vendorId: string,
-                  typeUrlPattern: string}> {
+  async getGatekeeperClassFor(
+    accountId: number,
+    url: string,
+  ): Promise<{
+    class: DurableObjectClass<Gatekeeper<any>>;
+    vendorId: string;
+    typeUrlPattern: string;
+  }> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) throw new Error("No such account.");
-    let {class: cls, resource} = await account.account.getGatekeeperClassFor(url);
+    let { class: cls, resource } =
+      await account.account.getGatekeeperClassFor(url);
 
     // Block whole gatekeepers + disabled resources at this single core-side chokepoint where a
     // resourceUrl becomes a capability (reached only via the user/UI-facing Overseer.newGatekeeper
@@ -1934,17 +2306,23 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let vendorId = account.vendorId.toLowerCase();
     if (config.disabledGatekeepers.includes(vendorId)) {
       throw new Error(
-          `The "${account.vendorId}" gatekeeper is disabled on this deployment by an administrator.`);
+        `The "${account.vendorId}" gatekeeper is disabled on this deployment by an administrator.`,
+      );
     }
 
     // Blocking here prevents minting a new capability to a disabled resource even if the request
     // bypasses the (separately filtered) picker/agent listings.
     if (isResourceDisabled(config, vendorId, resource.urlPattern)) {
       throw new Error(
-          `The "${resource.title}" resource is disabled on this deployment by an administrator.`);
+        `The "${resource.title}" resource is disabled on this deployment by an administrator.`,
+      );
     }
 
-    return {class: cls, vendorId: account.vendorId, typeUrlPattern: resource.urlPattern};
+    return {
+      class: cls,
+      vendorId: account.vendorId,
+      typeUrlPattern: resource.urlPattern,
+    };
   }
 
   /**
@@ -1957,15 +2335,18 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * Account *selection* (which of the user's accounts to use for a given binding) is done by the
    * frontend; this method validates and resolves a chosen account to its verifier.
    */
-  async getVerifier(accountId: number, expectedVendorId: string)
-      : Promise<Fetcher<GatekeeperUserVerifier> | null> {
+  async getVerifier(
+    accountId: number,
+    expectedVendorId: string,
+  ): Promise<Fetcher<GatekeeperUserVerifier> | null> {
     let account = this.storage.connectedAccounts.get(accountId);
     if (!account) return null;
     if (account.vendorId !== expectedVendorId) {
       // Details stay server-side: this error reaches the browser via ensureObserver → open.
       console.error(
-          `getVerifier: account ${accountId} vendor "${account.vendorId}" ` +
-          `!= expected "${expectedVendorId}"`);
+        `getVerifier: account ${accountId} vendor "${account.vendorId}" ` +
+          `!= expected "${expectedVendorId}"`,
+      );
       throw new Error("Invalid account selection for this service.");
     }
     return await account.account.getVerifier();
@@ -1975,34 +2356,53 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * Describe one of the user's connected accounts so a caller can name it in a message. Returns null
    * if it no longer exists.
    */
-  async describeConnectedAccount(accountId: number): Promise<AccountDescription | null> {
+  async describeConnectedAccount(
+    accountId: number,
+  ): Promise<AccountDescription | null> {
     let account = this.storage.connectedAccounts.get(accountId);
     return account ? account.description : null;
   }
-
 }
 
 type GatekeeperConnectCallbackProps = {
   userId: string;
   accountId: number;
   vendorId: string;
-}
+};
 
 export class GatekeeperConnectCallbackImpl
-    extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
-    implements GatekeeperConnectCallback {
+  extends WorkerEntrypoint<Cloudflare.Env, GatekeeperConnectCallbackProps>
+  implements GatekeeperConnectCallback
+{
   #getUserStub() {
-    let userId = this.ctx.exports.UserDurableObject.idFromString(this.ctx.props.userId);
+    let userId = this.ctx.exports.UserDurableObject.idFromString(
+      this.ctx.props.userId,
+    );
     return this.ctx.exports.UserDurableObject.get(userId);
   }
 
-  complete(account: Fetcher<GatekeeperUser>, expiresAt?: Date): Promise<ConnectHandoff> {
-    let {accountId, vendorId} = this.ctx.props;
-    return this.#getUserStub().stagePendingConnect(accountId, account, vendorId, expiresAt);
+  complete(
+    account: Fetcher<GatekeeperUser>,
+    expiresAt?: Date,
+  ): Promise<ConnectHandoff> {
+    let { accountId, vendorId } = this.ctx.props;
+    return this.#getUserStub().stagePendingConnect(
+      accountId,
+      account,
+      vendorId,
+      expiresAt,
+    );
   }
 
-  reconnectComplete(stageId: string, expiresAt?: Date): Promise<ConnectHandoff> {
-    return this.#getUserStub().stagePendingRestore(this.ctx.props.accountId, stageId, expiresAt);
+  reconnectComplete(
+    stageId: string,
+    expiresAt?: Date,
+  ): Promise<ConnectHandoff> {
+    return this.#getUserStub().stagePendingRestore(
+      this.ctx.props.accountId,
+      stageId,
+      expiresAt,
+    );
   }
 
   async credentialsExpired(): Promise<void> {
@@ -2020,7 +2420,9 @@ export function normalizeUsername(username: string) {
   username = username.toLowerCase();
 
   if (!username.match(/^[a-z][a-z0-9_]*$/)) {
-    throw new Error("Invalid username. Must be alphanumeric starting with a letter.")
+    throw new Error(
+      "Invalid username. Must be alphanumeric starting with a letter.",
+    );
   }
 
   return username;

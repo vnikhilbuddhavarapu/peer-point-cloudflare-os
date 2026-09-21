@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { accessRateLimitKey, verifyCfAccessJwt } from "../src/access.js";
+import type { JWTPayload } from "jose";
+import {
+  accessEmail,
+  accessRateLimitKey,
+  verifyCfAccessJwt,
+} from "../src/access.js";
 
 const joseMocks = vi.hoisted(() => ({
   createRemoteJWKSet: vi.fn(() => vi.fn()),
@@ -65,6 +70,22 @@ describe("verifyCfAccessJwt", () => {
   });
 });
 
+describe("accessEmail", () => {
+  it.each([
+    [{}, null],
+    [{ email: null }, null],
+    [{ email: 123 }, null],
+    [{ email: "" }, null],
+    [{ email: "  \t" }, null],
+    [{ email: "  person@example.com \n" }, "person@example.com"],
+  ])(
+    "extracts only a trimmed non-empty string from %j",
+    (payload, expected) => {
+      expect(accessEmail(payload as JWTPayload)).toBe(expected);
+    },
+  );
+});
+
 describe("accessRateLimitKey", () => {
   it("uses the verified subject and hashes email only as a fallback", async () => {
     await expect(accessRateLimitKey({ sub: "user-1", email: "person@example.com" }))
@@ -72,5 +93,7 @@ describe("accessRateLimitKey", () => {
     const emailKey = await accessRateLimitKey({ email: "person@example.com" });
     expect(emailKey).toMatch(/^access-email:[0-9a-f]{64}$/);
     expect(emailKey).not.toContain("person@example.com");
+    await expect(accessRateLimitKey({ email: " \t" })).resolves.toBeNull();
+    await expect(accessRateLimitKey({ email: " person@example.com " })).resolves.toBe(emailKey);
   });
 });

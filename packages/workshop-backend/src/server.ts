@@ -1,7 +1,44 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type { JWTPayload } from "jose";
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart } from '@gadgets/workshop-shared/api';
+import {
+  PublicApi,
+  AuthenticatedApi,
+  Overseer,
+  GadgetMetadataWithTimestamps,
+  AiChatAuthorInfo,
+  AiModelConfig,
+  AiGatewayInfo,
+  AiModelProvider,
+  ConnectedAccountsSubscriber,
+  ConnectedAccountsFilter,
+  GatekeeperVendorFilter,
+  ObserverConfigCallback,
+  BlueprintLibrarySummary,
+  BlueprintPublicInfo,
+  BlueprintUserSummary,
+  BlueprintBindingAssignment,
+  AgentSpawnerConfig,
+  WorkpieceId,
+  BLUEPRINT_SCREENSHOT_PATH_PREFIX,
+  BLUEPRINT_SCREENSHOT_R2_PREFIX,
+  blueprintScreenshotUrl,
+  ServerConfig,
+  CloudflareUsageInfo,
+  CloudflareAccountOption,
+  LoginAttempt,
+  GatekeeperAppInfo,
+  AdminApi,
+  GatekeeperVendorInfo,
+  OutputFormatOffer,
+  ListOutputsResult,
+  UserDirectoryRecord,
+  createOpenGadgetError,
+  getOpenGadgetErrorCode,
+  OPEN_GADGET_ERROR_CODES,
+  AUTH_ERROR_CODES,
+  createAuthError,
+  ConnectFlowStart,
+} from "@gadgets/workshop-shared/api";
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import { isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
@@ -26,7 +63,7 @@ import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
-import { verifyCfAccessJwt } from "./access.js";
+import { accessEmail, verifyCfAccessJwt } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -667,9 +704,12 @@ class LoginAttemptImpl extends RpcTarget implements LoginAttempt {
 class PublicApiImpl extends RpcTarget implements PublicApi {
   users: DurableObjectNamespace<UserDurableObject>;
 
-  constructor(private ctx: ExecutionContext, private env: Env,
-      private abortSession: (reason: Error) => void,
-      private accessPayload?: JWTPayload) {
+  constructor(
+    private ctx: ExecutionContext,
+    private env: Env,
+    private abortSession: (reason: Error) => void,
+    private accessEmail?: string,
+  ) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
   }
@@ -741,11 +781,11 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
-    if (!this.accessPayload) {
+    if (!this.accessEmail) {
       throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
     }
 
-    let email = this.accessPayload.email as string;
+    let email = this.accessEmail;
     let userId = this.users.idFromName(email);
     let signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
     let accountCreated =
@@ -884,7 +924,7 @@ export default {
             }));
       }
 
-      let accessPayload: JWTPayload | undefined;
+      let verifiedAccessEmail: string | undefined;
 
       if (env.CF_ACCESS_AUD) {
         if (req.headers.get("Origin") !== url.origin) {
@@ -894,11 +934,14 @@ export default {
         const payload = await verifyCfAccessJwt(req, env);
         if (!payload) return new Response("Invalid CF access JWT.", { status: 403 });
 
-        if (!payload.email) {
-          return new Response("Access JWT didn't specify email address.", { status: 403 });
+        const email = accessEmail(payload);
+        if (!email) {
+          return new Response("Access JWT didn't specify email address.", {
+            status: 403,
+          });
         }
 
-        accessPayload = payload;
+        verifiedAccessEmail = email;
       }
 
       // HACK: Implement `abortSession` callback by closing the websocket.
@@ -910,9 +953,11 @@ export default {
         abortController.abort(reason);
       };
 
-      return await newWorkersRpcResponse(req,
-          new PublicApiImpl(ctx, env, abortSession, accessPayload),
-          { abortSignal: abortController.signal });
+      return await newWorkersRpcResponse(
+        req,
+        new PublicApiImpl(ctx, env, abortSession, verifiedAccessEmail),
+        { abortSignal: abortController.signal },
+      );
     }
 
     return new Response("Not Found", {status: 404});
